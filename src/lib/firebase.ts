@@ -15,6 +15,7 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Expense, Settlement, AppSettings, UserMember } from '../types';
 import { buildExcelWorkbook, parseExcelWorkbook } from '../utils/excelWorkbook';
+import { getCurrencyMeta } from '../utils/currencyConstants';
 import * as xlsxModule from 'xlsx';
 
 const XLSX = (xlsxModule as any).default || xlsxModule;
@@ -218,31 +219,80 @@ export function subscribeUsers(
 }
 
 /**
+ * Helper to convert Expense object to Firestore-safe document (no undefined fields)
+ */
+export function expenseToFirestoreDoc(exp: Expense): Record<string, any> {
+  return {
+    id: exp.id,
+    title: exp.title || '',
+    amount: Number(exp.amount) || 0,
+    date: exp.date || new Date().toISOString().split('T')[0],
+    category: exp.category || 'other',
+    paidBy: exp.paidBy || '',
+    splitType: exp.splitType || 'equal',
+    expenseScope: exp.expenseScope || 'shared',
+    splitAmong: exp.splitAmong || null,
+    myShare: exp.myShare !== undefined && exp.myShare !== null ? Number(exp.myShare) : null,
+    friendShare: exp.friendShare !== undefined && exp.friendShare !== null ? Number(exp.friendShare) : null,
+    notes: exp.notes || null,
+    originalAmount: exp.originalAmount !== undefined && exp.originalAmount !== null ? Number(exp.originalAmount) : null,
+    originalCurrency: exp.originalCurrency || null,
+    originalCurrencySymbol: exp.originalCurrencySymbol || null,
+    exchangeRate: exp.exchangeRate !== undefined && exp.exchangeRate !== null ? Number(exp.exchangeRate) : null,
+    createdAt: exp.createdAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+/**
+ * Helper to convert Settlement object to Firestore-safe document (no undefined fields)
+ */
+export function settlementToFirestoreDoc(set: Settlement): Record<string, any> {
+  return {
+    id: set.id,
+    amount: Number(set.amount) || 0,
+    date: set.date || new Date().toISOString().split('T')[0],
+    paidBy: set.paidBy || '',
+    paidTo: set.paidTo || '',
+    notes: set.notes || null,
+    createdAt: set.createdAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+/**
+ * Recursively remove or replace undefined values to ensure Firestore compliance
+ */
+export function cleanForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) {
+    return null as any;
+  }
+  if (Array.isArray(data)) {
+    return data.map(item => cleanForFirestore(item)) as any;
+  }
+  if (typeof data === 'object') {
+    const cleaned: Record<string, any> = {};
+    for (const [key, value] of Object.entries(data as Record<string, any>)) {
+      if (value === undefined) {
+        cleaned[key] = null;
+      } else if (value !== null && typeof value === 'object') {
+        cleaned[key] = cleanForFirestore(value);
+      } else {
+        cleaned[key] = value;
+      }
+    }
+    return cleaned as T;
+  }
+  return data;
+}
+
+/**
  * Save or update an expense
  */
 export async function saveExpenseToFirestore(expense: Expense): Promise<void> {
   const path = `${EXPENSES_COLLECTION}/${expense.id}`;
   try {
-    await setDoc(doc(db, EXPENSES_COLLECTION, expense.id), {
-      id: expense.id,
-      title: expense.title || '',
-      amount: Number(expense.amount) || 0,
-      date: expense.date,
-      category: expense.category,
-      paidBy: expense.paidBy,
-      splitType: expense.splitType || 'equal',
-      expenseScope: expense.expenseScope || 'shared',
-      splitAmong: expense.splitAmong || null,
-      myShare: expense.myShare !== undefined ? Number(expense.myShare) : null,
-      friendShare: expense.friendShare !== undefined ? Number(expense.friendShare) : null,
-      notes: expense.notes || null,
-      originalAmount: expense.originalAmount !== undefined ? Number(expense.originalAmount) : null,
-      originalCurrency: expense.originalCurrency || null,
-      originalCurrencySymbol: expense.originalCurrencySymbol || null,
-      exchangeRate: expense.exchangeRate !== undefined ? Number(expense.exchangeRate) : null,
-      createdAt: expense.createdAt || Date.now(),
-      updatedAt: Date.now(),
-    });
+    await setDoc(doc(db, EXPENSES_COLLECTION, expense.id), expenseToFirestoreDoc(expense));
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -266,16 +316,7 @@ export async function deleteExpenseFromFirestore(expenseId: string): Promise<voi
 export async function saveSettlementToFirestore(settlement: Settlement): Promise<void> {
   const path = `${SETTLEMENTS_COLLECTION}/${settlement.id}`;
   try {
-    await setDoc(doc(db, SETTLEMENTS_COLLECTION, settlement.id), {
-      id: settlement.id,
-      amount: Number(settlement.amount) || 0,
-      date: settlement.date,
-      paidBy: settlement.paidBy,
-      paidTo: settlement.paidTo,
-      notes: settlement.notes || null,
-      createdAt: settlement.createdAt || Date.now(),
-      updatedAt: Date.now(),
-    });
+    await setDoc(doc(db, SETTLEMENTS_COLLECTION, settlement.id), settlementToFirestoreDoc(settlement));
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -300,7 +341,7 @@ export async function saveSettingsToFirestore(settings: AppSettings): Promise<vo
   const path = `${SETTINGS_COLLECTION}/${SETTINGS_DOC_ID}`;
   try {
     await setDoc(doc(db, SETTINGS_COLLECTION, SETTINGS_DOC_ID), {
-      ...settings,
+      ...cleanForFirestore(settings),
       updatedAt: Date.now(),
     });
   } catch (error) {
@@ -318,18 +359,70 @@ export async function saveUsersToFirestore(
     const batch = writeBatch(db);
     for (const u of users) {
       const docRef = doc(db, USERS_COLLECTION, u.id);
-      batch.set(docRef, {
+      batch.set(docRef, cleanForFirestore({
         id: u.id,
         name: u.name,
         passcode: u.passcode || '1234',
         currency: u.currency || 'SGD',
         role: u.role || (u.id === users[0]?.id ? 'main' : 'member'),
         createdAt: Date.now(),
-      });
+      }));
     }
     await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, USERS_COLLECTION);
+  }
+}
+
+export async function saveSingleUserToFirestore(user: {
+  id: string;
+  name: string;
+  passcode?: string;
+  currency?: string;
+  role?: string;
+}): Promise<void> {
+  const path = `${USERS_COLLECTION}/${user.id}`;
+  try {
+    await setDoc(doc(db, USERS_COLLECTION, user.id), cleanForFirestore({
+      id: user.id,
+      name: user.name,
+      passcode: user.passcode || '1234',
+      currency: user.currency || 'SGD',
+      role: user.role || 'member',
+      updatedAt: Date.now(),
+    }), { merge: true });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deleteUserFromFirestore(userId: string): Promise<void> {
+  const path = `${USERS_COLLECTION}/${userId}`;
+  try {
+    await deleteDoc(doc(db, USERS_COLLECTION, userId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function verifyUserPasswordInFirestore(userId: string, password: string): Promise<{ valid: boolean; error?: string }> {
+  try {
+    const docSnap = await getDoc(doc(db, USERS_COLLECTION, userId));
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      const storedPasscode = data.passcode !== undefined ? String(data.passcode) : '1234';
+      if (storedPasscode === password) {
+        return { valid: true };
+      }
+      return { valid: false, error: 'Incorrect password' };
+    }
+    // If not found in users collection, default password for members is 1234
+    if (password === '1234') {
+      return { valid: true };
+    }
+    return { valid: false, error: 'User not found or incorrect password' };
+  } catch {
+    return { valid: false, error: 'Authentication check failed' };
   }
 }
 
@@ -390,11 +483,7 @@ export async function replaceFirestoreWithExcelData(
       const chunk = parsed.expenses.slice(i, i + 400);
       const batchExp = writeBatch(db);
       for (const exp of chunk) {
-        batchExp.set(doc(db, EXPENSES_COLLECTION, exp.id), {
-          ...exp,
-          createdAt: exp.createdAt || Date.now(),
-          updatedAt: Date.now(),
-        });
+        batchExp.set(doc(db, EXPENSES_COLLECTION, exp.id), expenseToFirestoreDoc(exp));
       }
       await batchExp.commit();
     }
@@ -404,18 +493,33 @@ export async function replaceFirestoreWithExcelData(
       const chunk = parsed.settlements.slice(i, i + 400);
       const batchSet = writeBatch(db);
       for (const set of chunk) {
-        batchSet.set(doc(db, SETTLEMENTS_COLLECTION, set.id), {
-          ...set,
-          createdAt: set.createdAt || Date.now(),
-          updatedAt: Date.now(),
-        });
+        batchSet.set(doc(db, SETTLEMENTS_COLLECTION, set.id), settlementToFirestoreDoc(set));
       }
       await batchSet.commit();
     }
 
-    // 5. Update settings in Firestore
-    await setDoc(doc(db, SETTINGS_COLLECTION, SETTINGS_DOC_ID), {
+    // 5. Update settings in Firestore, preserving user's default currency preference from currentSettings
+    const activeUserId = currentSettings.mainUserId || parsed.settings.mainUserId;
+    const userDefaultCurrency =
+      (currentSettings.userCurrencies && currentSettings.userCurrencies[activeUserId]) ||
+      currentSettings.currencyCode ||
+      'SGD';
+    const userDefaultMeta = getCurrencyMeta(userDefaultCurrency);
+
+    const mergedSettings: AppSettings = {
       ...parsed.settings,
+      currencyCode: userDefaultCurrency,
+      currencySymbol: userDefaultMeta.symbol,
+      mainUserId: activeUserId,
+      userCurrencies: {
+        ...(parsed.settings.userCurrencies || {}),
+        ...(currentSettings.userCurrencies || {}),
+        [activeUserId]: userDefaultCurrency,
+      },
+    };
+
+    await setDoc(doc(db, SETTINGS_COLLECTION, SETTINGS_DOC_ID), {
+      ...cleanForFirestore(mergedSettings),
       updatedAt: Date.now(),
     });
 
@@ -429,8 +533,8 @@ export async function replaceFirestoreWithExcelData(
             id: m.id,
             name: m.name,
             passcode: '1234',
-            currency: parsed.settings.currencyCode || 'SGD',
-            role: m.id === parsed.settings.mainUserId ? 'main' : 'member',
+            currency: userDefaultCurrency,
+            role: m.id === activeUserId ? 'main' : 'member',
             updatedAt: Date.now(),
           },
           { merge: true }
@@ -439,7 +543,7 @@ export async function replaceFirestoreWithExcelData(
       await userBatch.commit();
     }
 
-    return parsed;
+    return { ...parsed, settings: mergedSettings };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'replaceFirestoreWithExcelData');
   }

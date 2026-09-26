@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import * as xlsxModule from 'xlsx';
 import type { WorkBook } from 'xlsx';
-import { buildExcelWorkbook, parseExcelWorkbook, buildBlankExcelTemplate, buildUsersExcelWorkbook } from './src/utils/excelWorkbook';
+import { buildExcelWorkbook, parseExcelWorkbook, buildBlankExcelTemplate, generateBlankExcelTemplateBuffer, buildUsersExcelWorkbook } from './src/utils/excelWorkbook';
 import { DEFAULT_SETTINGS, getInitialExpenses, generate5DigitMemberId } from './src/utils/initialData';
 import { normalizePayerId } from './src/utils/calculations';
 import type { AppSettings } from './src/types';
@@ -40,6 +40,14 @@ async function startServer() {
 
   // JSON parser with generous payload limit
   app.use(express.json({ limit: '15mb' }));
+
+  // Disable caching for HTML, script entry points, and API routes so users always load the latest code and live database state
+  app.use((req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
 
   // Excel database location
   const DATA_DIR = path.join(process.cwd(), 'data');
@@ -372,15 +380,20 @@ async function startServer() {
   });
 
   // API 5b: Download Blank Excel Template
-  app.get('/api/excel/template', (req, res) => {
+  app.get('/api/excel/template', async (req, res) => {
     try {
+      const settings = getEffectiveDefaultSettings();
+      const buffer = await generateBlankExcelTemplateBuffer(settings);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="expenses_template.xlsx"');
+      res.send(Buffer.from(buffer));
+    } catch (err: any) {
+      console.warn('Falling back to XLSX template on server:', err);
       const wb = buildBlankExcelTemplate(getEffectiveDefaultSettings());
       const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename="expenses_template.xlsx"');
       res.send(buffer);
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
     }
   });
 

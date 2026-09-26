@@ -36,7 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold text-sm shadow-sm relative">
             <User className="w-4 h-4 text-emerald-100" />
             {isDeveloper && (
-              <span className="absolute -top-1 -right-1 w-3 h-3 bg-amber-500 rounded-full border-2 border-white" title="Developer" />
+              <span className="absolute -top-1 -right-1 w-3 h-3 bg-indigo-600 rounded-full border-2 border-white" title="Developer" />
             )}
           </div>
           <div>
@@ -45,7 +45,7 @@ export const Header: React.FC<HeaderProps> = ({
                 {mainUser.name}
               </span>
               {isDeveloper && (
-                <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-extrabold rounded-md uppercase tracking-wider">
+                <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-800 border border-indigo-200 text-[10px] font-extrabold rounded-md uppercase tracking-wider">
                   Dev
                 </span>
               )}

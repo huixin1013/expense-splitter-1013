@@ -221,7 +221,7 @@ export const ExpenseItem: React.FC<ExpenseItemProps> = ({
       {/* Action bar */}
       <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
         <span className="text-[10px] text-slate-400 font-medium">
-          {expense.category === 'other' ? 'Category: Others' : meta.label}
+          {expense.category === 'other' ? 'Others' : meta.label}
         </span>
 
         {!isSettled ? (

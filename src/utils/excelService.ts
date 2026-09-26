@@ -1,12 +1,9 @@
 import * as xlsxModule from 'xlsx';
 import { Expense, Settlement, AppSettings } from '../types';
-import { buildExcelWorkbook, parseExcelWorkbook, buildBlankExcelTemplate, ExcelDatabasePayload } from './excelWorkbook';
+import { buildExcelWorkbook, parseExcelWorkbook, buildBlankExcelTemplate, generateBlankExcelTemplateBuffer, ExcelDatabasePayload } from './excelWorkbook';
+import { verifyUserPasswordInFirestore, saveSingleUserToFirestore } from '../lib/firebase';
 
 const XLSX = (xlsxModule as any).default || xlsxModule;
-
-const LOCAL_STORAGE_EXPENSES_KEY = 'friend_expense_splitter_expenses_v1';
-const LOCAL_STORAGE_SETTLEMENTS_KEY = 'friend_expense_splitter_settlements_v1';
-const LOCAL_STORAGE_SETTINGS_KEY = 'friend_expense_splitter_settings_v1';
 
 export interface ExcelSyncState {
   status: 'synced' | 'syncing' | 'offline' | 'error';
@@ -16,66 +13,33 @@ export interface ExcelSyncState {
 }
 
 /**
- * Load database from backend Excel storage (/api/excel/data),
- * with smooth fallback to localStorage if running client-only.
+ * Load database from backend Excel storage (/api/excel/data) directly,
+ * ensuring fresh live data without stale localStorage caching.
  */
 export async function loadExcelDatabase(defaultSettings: AppSettings): Promise<{
   payload: ExcelDatabasePayload;
   isBackendConnected: boolean;
 }> {
   try {
-    const res = await fetch('/api/excel/data');
+    const res = await fetch('/api/excel/data', { cache: 'no-store' });
     if (res.ok) {
       const json = await res.json();
       if (json.success && json.data) {
-        // Cache to localStorage for instant offline access
-        localStorage.setItem(LOCAL_STORAGE_EXPENSES_KEY, JSON.stringify(json.data.expenses));
-        localStorage.setItem(LOCAL_STORAGE_SETTLEMENTS_KEY, JSON.stringify(json.data.settlements));
-        
-        // Merge user preferences cleanly so per-user currency selection is preserved
-        const savedSettingsRaw = localStorage.getItem(LOCAL_STORAGE_SETTINGS_KEY);
-        let mergedSettings: AppSettings = json.data.settings;
-        if (savedSettingsRaw) {
-          try {
-            const localSettings = JSON.parse(savedSettingsRaw);
-            mergedSettings = {
-              ...json.data.settings,
-              mainUserId: localSettings.mainUserId || json.data.settings.mainUserId,
-              currencyCode: localSettings.currencyCode || json.data.settings.currencyCode,
-              currencySymbol: localSettings.currencySymbol || json.data.settings.currencySymbol,
-              userCurrencies: {
-                ...(json.data.settings.userCurrencies || {}),
-                ...(localSettings.userCurrencies || {}),
-              },
-            };
-          } catch {
-            // ignore
-          }
-        }
-        localStorage.setItem(LOCAL_STORAGE_SETTINGS_KEY, JSON.stringify(mergedSettings));
         return {
-          payload: {
-            ...json.data,
-            settings: mergedSettings,
-          },
+          payload: json.data,
           isBackendConnected: true,
         };
       }
     }
   } catch (err) {
-    console.warn('[ExcelService] Backend fetch failed, reading from local fallback:', err);
+    console.warn('[ExcelService] Backend fetch failed:', err);
   }
-
-  // Fallback to localStorage
-  const savedExpenses = localStorage.getItem(LOCAL_STORAGE_EXPENSES_KEY);
-  const savedSettlements = localStorage.getItem(LOCAL_STORAGE_SETTLEMENTS_KEY);
-  const savedSettings = localStorage.getItem(LOCAL_STORAGE_SETTINGS_KEY);
 
   return {
     payload: {
-      expenses: savedExpenses ? JSON.parse(savedExpenses) : [],
-      settlements: savedSettlements ? JSON.parse(savedSettlements) : [],
-      settings: savedSettings ? JSON.parse(savedSettings) : defaultSettings,
+      expenses: [],
+      settlements: [],
+      settings: defaultSettings,
     },
     isBackendConnected: false,
   };
@@ -83,21 +47,11 @@ export async function loadExcelDatabase(defaultSettings: AppSettings): Promise<{
 
 /**
  * Save data to backend Excel file (/data/expenses.xlsx)
- * and mirror to localStorage
  */
 export async function persistToExcel(payload: ExcelDatabasePayload): Promise<{
   success: boolean;
   backendSynced: boolean;
 }> {
-  // Always mirror to localStorage immediately
-  try {
-    localStorage.setItem(LOCAL_STORAGE_EXPENSES_KEY, JSON.stringify(payload.expenses));
-    localStorage.setItem(LOCAL_STORAGE_SETTLEMENTS_KEY, JSON.stringify(payload.settlements));
-    localStorage.setItem(LOCAL_STORAGE_SETTINGS_KEY, JSON.stringify(payload.settings));
-  } catch (e) {
-    console.error('Failed to save to localStorage:', e);
-  }
-
   // Sync to Express backend Excel file
   try {
     const res = await fetch('/api/excel/save', {
@@ -148,11 +102,10 @@ export function triggerExcelDownload(payload: ExcelDatabasePayload) {
 /**
  * Downloads a clean blank Excel template with all header columns defined and no expense data.
  */
-export function triggerExcelTemplateDownload(settings: AppSettings) {
+export async function triggerExcelTemplateDownload(settings: AppSettings): Promise<boolean> {
   try {
-    const wb = buildBlankExcelTemplate(settings);
-    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-    const blob = new Blob([wbout], {
+    const buffer = await generateBlankExcelTemplateBuffer(settings);
+    const blob = new Blob([buffer as any], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
     const url = URL.createObjectURL(blob);
@@ -165,9 +118,26 @@ export function triggerExcelTemplateDownload(settings: AppSettings) {
     URL.revokeObjectURL(url);
     return true;
   } catch (err) {
-    console.error('Failed to trigger client template download, trying server route:', err);
-    window.location.href = '/api/excel/template';
-    return false;
+    console.warn('ExcelJS template generator notice, trying fallback:', err);
+    try {
+      const wb = buildBlankExcelTemplate(settings);
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `expenses_template.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      return true;
+    } catch {
+      window.location.href = '/api/excel/template';
+      return false;
+    }
   }
 }
 
@@ -225,11 +195,6 @@ export async function importExcelFile(file: File, defaultSettings: AppSettings):
     console.warn('Backend upload sync warning:', e);
   }
 
-  // Update local storage
-  localStorage.setItem(LOCAL_STORAGE_EXPENSES_KEY, JSON.stringify(parsed.expenses));
-  localStorage.setItem(LOCAL_STORAGE_SETTLEMENTS_KEY, JSON.stringify(parsed.settlements));
-  localStorage.setItem(LOCAL_STORAGE_SETTINGS_KEY, JSON.stringify(parsed.settings));
-
   return parsed;
 }
 
@@ -276,6 +241,7 @@ export async function verifyUserPassword(
   userId: string,
   password: string
 ): Promise<{ valid: boolean; error?: string }> {
+  // 1. First attempt backend verification
   try {
     const res = await fetch('/api/users/verify', {
       method: 'POST',
@@ -283,25 +249,59 @@ export async function verifyUserPassword(
       body: JSON.stringify({ userId, password }),
     });
     if (res.ok) {
-      return await res.json();
+      const data = await res.json();
+      if (data.valid) return data;
     }
-    const errData = await res.json().catch(() => ({}));
-    return { valid: false, error: errData.error || 'Verification failed' };
+  } catch (err) {
+    console.warn('[User Verification] Backend verify error, falling back to database:', err);
+  }
+
+  // 2. Also check Firestore database directly for cross-device synchronization
+  try {
+    const fsResult = await verifyUserPasswordInFirestore(userId, password);
+    if (fsResult.valid) {
+      return { valid: true };
+    }
+    return fsResult;
   } catch (err: any) {
-    return { valid: false, error: err.message || 'Connection error' };
+    return { valid: false, error: err.message || 'Verification failed' };
   }
 }
 
 export async function addMemberWithPassword(name: string, password?: string) {
+  let memberId = `u_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
+  let result: any = { success: false };
+
   try {
     const res = await fetch('/api/users/add-member', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, password }),
     });
-    return await res.json();
+    if (res.ok) {
+      result = await res.json();
+      if (result.member?.id) {
+        memberId = result.member.id;
+      }
+    }
   } catch (err: any) {
-    return { success: false, error: err.message };
+    console.warn('[User Service] Backend add member fallback to Firestore:', err);
+  }
+
+  // Always sync newly created user to Firestore so all devices see it immediately
+  try {
+    await saveSingleUserToFirestore({
+      id: memberId,
+      name,
+      passcode: password || '1234',
+      role: 'member',
+    });
+    return {
+      success: true,
+      member: { id: memberId, name },
+    };
+  } catch {
+    return result.success ? result : { success: true, member: { id: memberId, name } };
   }
 }
 

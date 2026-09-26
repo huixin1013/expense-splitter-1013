@@ -18,6 +18,7 @@ export const SUPPORTED_CURRENCIES: CurrencyMeta[] = [
   { code: 'CNY', symbol: '¥', label: 'Chinese Yuan', flag: '🇨🇳' },
   { code: 'IDR', symbol: 'Rp', label: 'Indonesian Rupiah', flag: '🇮🇩' },
   { code: 'TWD', symbol: 'NT$', label: 'New Taiwan Dollar', flag: '🇹🇼' },
+  { code: 'HKD', symbol: 'HK$', label: 'Hong Kong Dollar', flag: '🇭🇰' },
 ];
 
 export const DEFAULT_CURRENCY = SUPPORTED_CURRENCIES[0]; // SGD (SGD)

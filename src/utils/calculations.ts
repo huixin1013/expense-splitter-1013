@@ -1,4 +1,5 @@
 import { Expense, Settlement, BalanceSummary, MemberBalanceDetail, AppSettings, UserMember } from '../types';
+import { getConversionRate } from './currencyUtils';
 
 /**
  * Normalizes a paidBy / member identifier to a valid member ID in the members list.
@@ -15,27 +16,29 @@ export function normalizePayerId(
   if (!raw) return mainUserId;
   const lower = raw.toLowerCase();
 
+  if (!members || !Array.isArray(members)) return raw;
+
   if (lower === 'me') return mainUserId;
   if (lower === 'friend') {
-    const other = members.find(m => m.id !== mainUserId);
+    const other = members.find(m => m && m.id && m.id !== mainUserId);
     return other ? other.id : members[0]?.id || '10002';
   }
 
   // 1. Exact ID match (case-insensitive)
-  const byId = members.find(m => m.id.toLowerCase() === lower);
+  const byId = members.find(m => m && m.id && String(m.id).toLowerCase() === lower);
   if (byId) return byId.id;
 
   // 2. Exact Name match (case-insensitive)
-  const byName = members.find(m => m.name.toLowerCase() === lower);
+  const byName = members.find(m => m && m.name && String(m.name).toLowerCase() === lower);
   if (byName) return byName.id;
 
   // 3. Slug / Prefix / Suffix match
-  // e.g. "u_huixin" vs "u_huixin_8729" or "u_ali" vs "u_ali_1" or "huixin" vs "u_huixin_8729"
   const stripped = lower.replace(/^u_/, '').replace(/_\d+$/, '').replace(/[^a-z0-9]/g, '');
   if (stripped) {
     const bySlug = members.find(m => {
-      const mStripped = m.id.toLowerCase().replace(/^u_/, '').replace(/_\d+$/, '').replace(/[^a-z0-9]/g, '');
-      const mNameClean = m.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!m) return false;
+      const mStripped = String(m.id || '').toLowerCase().replace(/^u_/, '').replace(/_\d+$/, '').replace(/[^a-z0-9]/g, '');
+      const mNameClean = String(m.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
       return mStripped === stripped || mNameClean === stripped;
     });
     if (bySlug) return bySlug.id;
@@ -213,6 +216,40 @@ export function calculateAllIndividualMemberFinancials(
 }
 
 /**
+ * Resolves the amount of an expense in the specified target currency (e.g. settings.currencyCode).
+ * - If expense.originalCurrency and expense.originalAmount are available:
+ *   - If originalCurrency matches targetCurrency: returns originalAmount directly without conversion drift.
+ *   - Otherwise: converts originalAmount using getConversionRate(originalCurrency, targetCurrency, liveRates).
+ * - Fallback: expense.amount * rateMultiplier.
+ */
+export function getExpenseAmountInCurrency(
+  exp: Expense,
+  targetCurrency: string = 'SGD',
+  baseCurrency: string = 'SGD',
+  liveRates?: Record<string, number> | null,
+  rateMultiplier: number = 1.0
+): number {
+  const target = (targetCurrency || 'SGD').toUpperCase();
+
+  if (exp.originalCurrency && exp.originalAmount !== undefined && Number(exp.originalAmount) > 0) {
+    const orig = exp.originalCurrency.toUpperCase();
+    if (orig === target) {
+      return Number(exp.originalAmount);
+    }
+    const rate = getConversionRate(orig, target, liveRates);
+    if (rate > 0) {
+      const isZeroDecimal = target === 'JPY' || target === 'KRW';
+      const converted = Number(exp.originalAmount) * rate;
+      return isZeroDecimal ? Math.round(converted) : Math.round(converted * 100) / 100;
+    }
+  }
+
+  const isZeroDecimal = target === 'JPY' || target === 'KRW';
+  const val = Number(exp.amount || 0) * (rateMultiplier || 1.0);
+  return isZeroDecimal ? Math.round(val) : Math.round(val * 100) / 100;
+}
+
+/**
  * Calculates complete balances from the perspective of the designated Main User,
  * with optional rateMultiplier for viewing conversions.
  */
@@ -220,7 +257,8 @@ export function calculateBalanceSummary(
   expenses: Expense[],
   settlements: Settlement[],
   settings: AppSettings,
-  rateMultiplier: number = 1.0
+  rateMultiplier: number = 1.0,
+  liveRates?: Record<string, number> | null
 ): BalanceSummary {
   const members = settings.members && settings.members.length > 0
     ? settings.members
@@ -229,6 +267,8 @@ export function calculateBalanceSummary(
   const mainUserId = settings.mainUserId || members[0]?.id || '10001';
   const mainUser = members.find(m => m.id === mainUserId) || members[0];
   const allMemberIds = members.map(m => m.id);
+  const targetCurrency = settings.currencyCode || 'SGD';
+  const baseCurrency = settings.baseCurrencyCode || 'SGD';
 
   let rawTotalSpentAllTime = 0;
   let rawTotalShared = 0;
@@ -246,22 +286,24 @@ export function calculateBalanceSummary(
   }
 
   for (const exp of expenses) {
-    rawTotalSpentAllTime += exp.amount;
+    const expAmount = getExpenseAmountInCurrency(exp, targetCurrency, baseCurrency, liveRates, rateMultiplier);
+    rawTotalSpentAllTime += expAmount;
+
     const payerId = normalizePayerId(exp.paidBy, mainUserId, members);
     const isPersonal = exp.expenseScope === 'personal' || exp.splitType === 'personal';
 
     if (isPersonal) {
       if (payerId === mainUserId) {
-        rawTotalPersonalMain += exp.amount;
-        rawTotalPaidByMain += exp.amount;
+        rawTotalPersonalMain += expAmount;
+        rawTotalPaidByMain += expAmount;
       }
       continue;
     }
 
     // Shared expense
-    rawTotalShared += exp.amount;
+    rawTotalShared += expAmount;
     if (payerId === mainUserId) {
-      rawTotalPaidByMain += exp.amount;
+      rawTotalPaidByMain += expAmount;
     }
 
     // Determine participating members
@@ -275,7 +317,7 @@ export function calculateBalanceSummary(
       participants = allMemberIds;
     }
 
-    const sharePerPerson = exp.amount / participants.length;
+    const sharePerPerson = expAmount / participants.length;
 
     if (participants.includes(mainUserId)) {
       rawTotalMainShare += sharePerPerson;
@@ -309,30 +351,25 @@ export function calculateBalanceSummary(
         : mainUserId;
     }
 
+    const setAmount = Number(set.amount || 0) * (rateMultiplier || 1.0);
+
     if (payerId === mainUserId && pairBalances[recipientId]) {
       // Main user repaid recipient -> reduces what main user owes recipient
-      pairBalances[recipientId].mainOwesThem -= set.amount;
+      pairBalances[recipientId].mainOwesThem -= setAmount;
     } else if (recipientId === mainUserId && pairBalances[payerId]) {
       // Member repaid main user -> reduces what member owes main user
-      pairBalances[payerId].theyOweMain -= set.amount;
+      pairBalances[payerId].theyOweMain -= setAmount;
     }
   }
 
-  // Apply rate multiplier to totals
-  const totalSpentAllTime = rawTotalSpentAllTime * rateMultiplier;
-  const totalShared = rawTotalShared * rateMultiplier;
-  const totalPersonalMain = rawTotalPersonalMain * rateMultiplier;
-  const totalPaidByMain = rawTotalPaidByMain * rateMultiplier;
-  const totalMainShare = rawTotalMainShare * rateMultiplier;
-
-  // Compile member balances with rateMultiplier
+  // Compile member balances
   const memberBalances: MemberBalanceDetail[] = [];
   let overallNet = 0;
 
   for (const m of members) {
     if (m.id === mainUserId) continue;
     const pair = pairBalances[m.id] || { theyOweMain: 0, mainOwesThem: 0 };
-    const net = Math.round((pair.theyOweMain - pair.mainOwesThem) * rateMultiplier * 100) / 100;
+    const net = Math.round((pair.theyOweMain - pair.mainOwesThem) * 100) / 100;
     overallNet += net;
 
     memberBalances.push({
@@ -358,19 +395,19 @@ export function calculateBalanceSummary(
   return {
     mainUserId,
     mainUserName: mainUser.name,
-    totalSpentAllTime: Math.round(totalSpentAllTime * 100) / 100,
-    totalShared: Math.round(totalShared * 100) / 100,
-    totalPersonalMain: Math.round(totalPersonalMain * 100) / 100,
-    totalPaidByMain: Math.round(totalPaidByMain * 100) / 100,
-    totalMainShare: Math.round(totalMainShare * 100) / 100,
+    totalSpentAllTime: Math.round(rawTotalSpentAllTime * 100) / 100,
+    totalShared: Math.round(rawTotalShared * 100) / 100,
+    totalPersonalMain: Math.round(rawTotalPersonalMain * 100) / 100,
+    totalPaidByMain: Math.round(rawTotalPaidByMain * 100) / 100,
+    totalMainShare: Math.round(rawTotalMainShare * 100) / 100,
     netBalance: overallNet,
     overallStatus,
     amountToReturn: Math.abs(overallNet),
     memberBalances,
     // Legacy support
     whoOwesWhom: legacyWhoOwesWhom,
-    totalPaidByMe: Math.round(totalPaidByMain * 100) / 100,
-    totalPaidByFriend: Math.round((totalSpentAllTime - totalPaidByMain) * 100) / 100,
-    totalPersonalMe: Math.round(totalPersonalMain * 100) / 100,
+    totalPaidByMe: Math.round(rawTotalPaidByMain * 100) / 100,
+    totalPaidByFriend: Math.round((rawTotalSpentAllTime - rawTotalPaidByMain) * 100) / 100,
+    totalPersonalMe: Math.round(rawTotalPersonalMain * 100) / 100,
   };
 }

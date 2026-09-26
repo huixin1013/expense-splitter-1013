@@ -3,12 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Friend Expense Splitter</title>
     <meta name="description" content="Calculate shared meals and daily expenses with your friend, track personal expenses, see who owes whom, and save all data directly into an Excel database." />
     <meta property="og:title" content="Friend Expense Splitter" />
     <meta property="og:description" content="Calculate shared meals and daily expenses with your friend, track personal expenses, see who owes whom, and save all data directly into an Excel database." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Suppress Vite preview iframe WebSocket disconnection notices
+      window.addEventListener('unhandledrejection', function (e) {
+        var reasonStr = String(e.reason && (e.reason.message || e.reason) || '');
+        if (reasonStr.indexOf('WebSocket') !== -1 || reasonStr.indexOf('websocket') !== -1) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      });
+      window.addEventListener('error', function (e) {
+        var msg = String(e.message || '');
+        if (msg.indexOf('WebSocket') !== -1 || msg.indexOf('websocket') !== -1) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

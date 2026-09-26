@@ -21,6 +21,7 @@ import {
   normalizePayerId,
   isUserInvolvedInExpense,
   isUserInvolvedInSettlement,
+  getExpenseAmountInCurrency,
 } from './utils/calculations';
 import { Header } from './components/Header';
 import { BalanceCard } from './components/BalanceCard';
@@ -61,40 +62,21 @@ import { getCurrencyMeta } from './utils/currencyConstants';
 import { getConversionRate } from './utils/currencyUtils';
 import { UserMember } from './types';
 
-const STORAGE_KEYS = {
-  EXPENSES: 'friend_expense_splitter_expenses_v1',
-  SETTLEMENTS: 'friend_expense_splitter_settlements_v1',
-  SETTINGS: 'friend_expense_splitter_settings_v1',
-};
-
 export default function App() {
-  // Load state from localStorage or initialize with defaults
-  const [settings, setSettings] = useState<AppSettings>(() => {
+  // Clean up any stale localStorage immediately on mount
+  useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.SETTINGS);
-      return saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
+      localStorage.clear();
+      sessionStorage.clear();
     } catch {
-      return DEFAULT_SETTINGS;
+      // ignore
     }
-  });
+  }, []);
 
-  const [expenses, setExpenses] = useState<Expense[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.EXPENSES);
-      return saved ? JSON.parse(saved) : getInitialExpenses();
-    } catch {
-      return getInitialExpenses();
-    }
-  });
-
-  const [settlements, setSettlements] = useState<Settlement[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.SETTLEMENTS);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Initialize state directly from defaults and load fresh from live database
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
 
   // Active view tab: 'overview' | 'history'
   const [activeTab, setActiveTab] = useState<'overview' | 'history'>('overview');
@@ -112,10 +94,6 @@ export default function App() {
   const [isVerifyPasswordOpen, setIsVerifyPasswordOpen] = useState(false);
   const [pendingSwitchUser, setPendingSwitchUser] = useState<UserMember | null>(null);
   const [developerUserId, setDeveloperUserId] = useState<string | null>(null);
-
-  // Real-time synchronization version trackers for multi-user sharing
-  const lastExpensesVersionRef = React.useRef<number>(0);
-  const lastUsersVersionRef = React.useRef<number>(0);
 
   // Live exchange rates state
   const [rates, setRates] = useState<Record<string, number> | null>(null);
@@ -179,8 +157,11 @@ export default function App() {
 
   // Total recorded spending in current currency for expenses user is involved with
   const totalSpent = useMemo(() => {
-    return userExpenses.reduce((sum, e) => sum + ((Number(e.amount) || 0) * (viewingRate || 1.0)), 0);
-  }, [userExpenses, viewingRate]);
+    return userExpenses.reduce(
+      (sum, e) => sum + getExpenseAmountInCurrency(e, activeCurrencyCode, baseCurrencyCode, rates, viewingRate),
+      0
+    );
+  }, [userExpenses, activeCurrencyCode, baseCurrencyCode, rates, viewingRate]);
 
   // Convert database currency across all expenses and settlements
   const handleConvertDatabaseCurrency = async (params: {
@@ -197,9 +178,6 @@ export default function App() {
         setExpenses(res.updatedData.expenses);
         setSettlements(res.updatedData.settlements);
         setSettings(res.updatedData.settings);
-        localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(res.updatedData.expenses));
-        localStorage.setItem(STORAGE_KEYS.SETTLEMENTS, JSON.stringify(res.updatedData.settlements));
-        localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(res.updatedData.settings));
         setIsSyncingExcel(false);
         return true;
       } else {
@@ -240,28 +218,28 @@ export default function App() {
     });
   }, []);
 
-  // Real-time Firebase Firestore synchronization
+  // Real-time Firebase Firestore synchronization across all devices
   useEffect(() => {
     let isMounted = true;
+    let hasReceivedCloudExpenses = false;
+    let hasReceivedCloudSettlements = false;
 
-    // 1. Subscribe to real-time Expenses
+    // 1. Subscribe to real-time Expenses directly from database
     const unsubscribeExpenses = subscribeExpenses((cloudExpenses) => {
       if (!isMounted) return;
-      if (cloudExpenses && cloudExpenses.length > 0) {
-        setExpenses(cloudExpenses);
-        setInitialLoaded(true);
-      }
+      hasReceivedCloudExpenses = true;
+      setExpenses(cloudExpenses || []);
+      setInitialLoaded(true);
     });
 
-    // 2. Subscribe to real-time Settlements
+    // 2. Subscribe to real-time Settlements directly from database
     const unsubscribeSettlements = subscribeSettlements((cloudSettlements) => {
       if (!isMounted) return;
-      if (cloudSettlements) {
-        setSettlements(cloudSettlements);
-      }
+      hasReceivedCloudSettlements = true;
+      setSettlements(cloudSettlements || []);
     });
 
-    // 3. Subscribe to real-time Settings
+    // 3. Subscribe to real-time Settings directly from database
     const unsubscribeSettings = subscribeSettings((cloudSettings) => {
       if (!isMounted) return;
       if (cloudSettings) {
@@ -275,8 +253,7 @@ export default function App() {
             ...(cloudSettings.userCurrencies || {}),
             ...(prev.userCurrencies || {}),
           };
-          const localSavedUserCur = localStorage.getItem(`user_currency_${activeId}`);
-          const userCurCode = localSavedUserCur ||
+          const userCurCode =
             userCurrencies[activeId] ||
             prev.currencyCode ||
             cloudSettings.currencyCode ||
@@ -298,15 +275,36 @@ export default function App() {
       }
     });
 
-    // Initial load fallback from server Excel storage if offline/first boot
+    // 4. Subscribe to real-time Users / Members directly from database
+    const unsubscribeUsers = subscribeUsers((cloudUsers) => {
+      if (!isMounted) return;
+      if (cloudUsers && cloudUsers.length > 0) {
+        setSettings(prev => {
+          const userMembers: UserMember[] = cloudUsers.map(u => ({ id: u.id, name: u.name }));
+          const isCurrentValid = prev.mainUserId && userMembers.some(m => m.id === prev.mainUserId);
+          const activeId = isCurrentValid ? prev.mainUserId : (prev.mainUserId || userMembers[0]?.id || 'u_me');
+          const activeMember = userMembers.find(m => m.id === activeId);
+          return {
+            ...prev,
+            members: userMembers,
+            mainUserId: activeId,
+            myName: activeMember ? activeMember.name : prev.myName,
+          };
+        });
+      }
+    });
+
+    // Initial load from backend Excel database only as secondary fallback if Firestore has no data
     loadExcelDatabase(DEFAULT_SETTINGS).then(result => {
       if (!isMounted) return;
       setIsBackendConnected(result.isBackendConnected);
-      if (result.payload.expenses && result.payload.expenses.length > 0) {
-        setExpenses(prev => (prev.length === 0 ? result.payload.expenses : prev));
-      }
-      if (result.payload.settlements) {
-        setSettlements(prev => (prev.length === 0 ? result.payload.settlements : prev));
+      if (result.payload) {
+        if (!hasReceivedCloudExpenses && result.payload.expenses && result.payload.expenses.length > 0) {
+          setExpenses(prev => (prev.length === 0 ? result.payload.expenses : prev));
+        }
+        if (!hasReceivedCloudSettlements && result.payload.settlements && result.payload.settlements.length > 0) {
+          setSettlements(prev => (prev.length === 0 ? result.payload.settlements : prev));
+        }
       }
       setInitialLoaded(true);
     });
@@ -316,123 +314,28 @@ export default function App() {
       unsubscribeExpenses();
       unsubscribeSettlements();
       unsubscribeSettings();
+      unsubscribeUsers();
     };
   }, []);
 
-  // Multi-user real-time synchronization poller
-  useEffect(() => {
-    if (!initialLoaded) return;
-
-    const checkSync = async () => {
-      try {
-        const sync = await fetchSyncVersion();
-        if (!sync) return;
-
-        // If another user updated expenses or settlements
-        if (lastExpensesVersionRef.current > 0 && sync.expensesVersion > lastExpensesVersionRef.current) {
-          lastExpensesVersionRef.current = sync.expensesVersion;
-          const result = await loadExcelDatabase(settings);
-          if (result.payload.expenses) {
-            setExpenses(result.payload.expenses);
-          }
-          if (result.payload.settlements) {
-            setSettlements(result.payload.settlements);
-          }
-        } else if (lastExpensesVersionRef.current === 0) {
-          lastExpensesVersionRef.current = sync.expensesVersion;
-        }
-
-        // If another user added or changed users/members
-        if (lastUsersVersionRef.current > 0 && sync.usersVersion > lastUsersVersionRef.current) {
-          lastUsersVersionRef.current = sync.usersVersion;
-          const uStatus = await fetchUsersStatus();
-          if (uStatus && uStatus.configured) {
-            setSettings(prev => {
-              // Only update members list; never overwrite the current user's active main user selection unless the member was removed
-              const isCurrentValid = prev.mainUserId && uStatus.members.some(m => m.id === prev.mainUserId);
-              const activeId = isCurrentValid ? prev.mainUserId : (uStatus.mainUserId || uStatus.members[0]?.id || prev.mainUserId);
-              const activeMember = uStatus.members.find(m => m.id === activeId);
-              return {
-                ...prev,
-                members: uStatus.members,
-                mainUserId: activeId,
-                myName: activeMember ? activeMember.name : prev.myName,
-              };
-            });
-          }
-        } else if (lastUsersVersionRef.current === 0) {
-          lastUsersVersionRef.current = sync.usersVersion;
-        }
-      } catch {
-        // silent
-      }
-    };
-
-    const interval = setInterval(checkSync, 4000);
-    const handleFocus = () => {
-      checkSync();
-    };
-    window.addEventListener('focus', handleFocus);
-
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, [initialLoaded, settings]);
-
-  // Persist to Excel file whenever state changes (after initial load)
-  useEffect(() => {
-    if (!initialLoaded) return;
-
-    const timer = setTimeout(() => {
-      setIsSyncingExcel(true);
-      persistToExcel({ expenses, settlements, settings })
-        .then(result => {
-          setIsBackendConnected(result.backendSynced);
-          setIsSyncingExcel(false);
-          // Keep local version ref up to date
-          fetchSyncVersion().then(v => {
-            if (v) lastExpensesVersionRef.current = v.expensesVersion;
-          });
-        })
-        .catch(err => {
-          console.warn('Excel database save notice:', err);
-          setIsSyncingExcel(false);
-        });
-    }, 400);
-
-    return () => clearTimeout(timer);
-  }, [expenses, settlements, settings, initialLoaded]);
-
-  // Also persist to localStorage as instant offline mirror
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
-    } catch {
-      // ignore
-    }
-  }, [settings]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
-    } catch {
-      // ignore
-    }
-  }, [expenses]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.SETTLEMENTS, JSON.stringify(settlements));
-    } catch {
-      // ignore
-    }
-  }, [settlements]);
+  // Helper to persist explicit user mutations to backend Excel backup without overwriting during page load
+  const syncExcelBackup = (newExpenses: Expense[], newSettlements: Settlement[], newSettings: AppSettings) => {
+    setIsSyncingExcel(true);
+    persistToExcel({ expenses: newExpenses, settlements: newSettlements, settings: newSettings })
+      .then(result => {
+        setIsBackendConnected(result.backendSynced);
+        setIsSyncingExcel(false);
+      })
+      .catch(err => {
+        console.warn('Excel backup notice:', err);
+        setIsSyncingExcel(false);
+      });
+  };
 
   // Financial calculations
   const balanceSummary = useMemo(() => {
-    return calculateBalanceSummary(expenses, settlements, settings, viewingRate);
-  }, [expenses, settlements, settings, viewingRate]);
+    return calculateBalanceSummary(expenses, settlements, settings, viewingRate, rates);
+  }, [expenses, settlements, settings, viewingRate, rates]);
 
   // Switch active main user with password verification
   const handleRequestSwitchUser = (userId: string) => {
@@ -449,7 +352,6 @@ export default function App() {
 
     // Load individual user's selected default currency
     const userCurCode = (settings.userCurrencies && settings.userCurrencies[userId]) ||
-      localStorage.getItem(`user_currency_${userId}`) ||
       settings.currencyCode || 'MYR';
     const userCurMeta = getCurrencyMeta(userCurCode);
 
@@ -461,16 +363,12 @@ export default function App() {
         currencyCode: userCurCode,
         currencySymbol: userCurMeta.symbol,
       };
-      try {
-        localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(updated));
-      } catch {
-        // ignore
-      }
       persistToExcel({ expenses, settlements, settings: updated }).catch(() => {});
       return updated;
     });
     setActiveUserBackend(userId).catch(() => {});
     setIsVerifyPasswordOpen(false);
+    setIsSettingsOpen(false);
     setPendingSwitchUser(null);
   };
 
@@ -552,8 +450,11 @@ export default function App() {
 
   // Total amount of currently filtered expenses
   const filteredTotal = useMemo(() => {
-    return filteredExpenses.reduce((sum, e) => sum + ((Number(e.amount) || 0) * (viewingRate || 1.0)), 0);
-  }, [filteredExpenses, viewingRate]);
+    return filteredExpenses.reduce(
+      (sum, e) => sum + getExpenseAmountInCurrency(e, activeCurrencyCode, baseCurrencyCode, rates, viewingRate),
+      0
+    );
+  }, [filteredExpenses, activeCurrencyCode, baseCurrencyCode, rates, viewingRate]);
 
   // Reload and Import handlers for Excel database
   const handleReloadFromExcel = async () => {
@@ -571,7 +472,26 @@ export default function App() {
   }) => {
     setExpenses(data.expenses);
     setSettlements(data.settlements);
-    setSettings(data.settings);
+    setSettings(prev => {
+      const activeId = prev.mainUserId || data.settings.mainUserId;
+      const userDefaultCurrency =
+        (prev.userCurrencies && prev.userCurrencies[activeId]) ||
+        prev.currencyCode ||
+        'SGD';
+      const userDefaultMeta = getCurrencyMeta(userDefaultCurrency);
+
+      return {
+        ...data.settings,
+        mainUserId: activeId,
+        currencyCode: userDefaultCurrency,
+        currencySymbol: userDefaultMeta.symbol,
+        userCurrencies: {
+          ...(data.settings.userCurrencies || {}),
+          ...(prev.userCurrencies || {}),
+          [activeId]: userDefaultCurrency,
+        },
+      };
+    });
   };
 
   // Handlers
@@ -579,6 +499,7 @@ export default function App() {
     expenseData: Omit<Expense, 'id' | 'createdAt'>,
     existingId?: string
   ) => {
+    let nextExpenses: Expense[] = [];
     if (existingId) {
       // Update
       const existing = expenses.find(item => item.id === existingId);
@@ -587,11 +508,8 @@ export default function App() {
         id: existingId,
         createdAt: existing?.createdAt || Date.now(),
       };
-      setExpenses(prev =>
-        prev.map(item =>
-          item.id === existingId ? updatedExpense : item
-        )
-      );
+      nextExpenses = expenses.map(item => item.id === existingId ? updatedExpense : item);
+      setExpenses(nextExpenses);
       saveExpenseToFirestore(updatedExpense).catch(err => console.warn('Firestore expense update:', err));
     } else {
       // Create
@@ -600,9 +518,11 @@ export default function App() {
         id: `exp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         createdAt: Date.now(),
       };
-      setExpenses(prev => [newExpense, ...prev]);
+      nextExpenses = [newExpense, ...expenses];
+      setExpenses(nextExpenses);
       saveExpenseToFirestore(newExpense).catch(err => console.warn('Firestore expense create:', err));
     }
+    syncExcelBackup(nextExpenses, settlements, settings);
     setEditingExpense(null);
   };
 
@@ -614,8 +534,10 @@ export default function App() {
   };
 
   const handleConfirmedDeleteExpense = (id: string) => {
-    setExpenses(prev => prev.filter(e => e.id !== id));
+    const nextExpenses = expenses.filter(e => e.id !== id);
+    setExpenses(nextExpenses);
     deleteExpenseFromFirestore(id).catch(err => console.warn('Firestore expense delete:', err));
+    syncExcelBackup(nextExpenses, settlements, settings);
     setDeletingExpense(null);
   };
 
@@ -635,13 +557,17 @@ export default function App() {
       notes,
       createdAt: Date.now(),
     };
-    setSettlements(prev => [newSettlement, ...prev]);
+    const nextSettlements = [newSettlement, ...settlements];
+    setSettlements(nextSettlements);
     saveSettlementToFirestore(newSettlement).catch(err => console.warn('Firestore settlement save:', err));
+    syncExcelBackup(expenses, nextSettlements, settings);
   };
 
   const handleDeleteSettlement = (id: string) => {
-    setSettlements(prev => prev.filter(s => s.id !== id));
+    const nextSettlements = settlements.filter(s => s.id !== id);
+    setSettlements(nextSettlements);
     deleteSettlementFromFirestore(id).catch(err => console.warn('Firestore settlement delete:', err));
+    syncExcelBackup(expenses, nextSettlements, settings);
   };
 
   const handleResetSampleData = () => {
@@ -650,17 +576,20 @@ export default function App() {
     setSettlements([]);
     setSettings(DEFAULT_SETTINGS);
     saveSettingsToFirestore(DEFAULT_SETTINGS).catch(() => {});
+    syncExcelBackup(initialExps, [], DEFAULT_SETTINGS);
   };
 
   const handleClearAllData = () => {
     setExpenses([]);
     setSettlements([]);
     clearTransactionsInFirestore().catch(err => console.warn('Firestore clear error:', err));
+    syncExcelBackup([], [], settings);
   };
 
   const handleUpdateSettings = (newSettings: AppSettings) => {
     setSettings(newSettings);
     saveSettingsToFirestore(newSettings).catch(err => console.warn('Firestore settings update:', err));
+    syncExcelBackup(expenses, settlements, newSettings);
   };
 
   const sym = settings.currencySymbol;
@@ -1163,6 +1092,7 @@ export default function App() {
           settings={settings}
           onDataImported={handleDataImported}
           onReloadFromBackend={handleReloadFromExcel}
+          onClearAllData={handleClearAllData}
           isBackendConnected={isBackendConnected}
           isDeveloper={isDeveloper}
         />

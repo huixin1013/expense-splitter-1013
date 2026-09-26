@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { X, FileSpreadsheet, Download, Upload, RefreshCw, CheckCircle2, AlertCircle, Database, FileText, FileDown, Cloud, Zap } from 'lucide-react';
+import { X, FileSpreadsheet, Download, Upload, CheckCircle2, AlertCircle, Database, FileText, FileDown, Cloud, Zap, Trash2 } from 'lucide-react';
 import { Expense, Settlement, AppSettings } from '../types';
 import { triggerExcelDownload, triggerExcelTemplateDownload, importExcelFile, triggerUsersExcelDownload } from '../utils/excelService';
 import { replaceFirestoreWithExcelData, exportFirestoreToExcelFile } from '../lib/firebase';
@@ -14,7 +14,8 @@ interface ExcelDatabaseModalProps {
   settlements: Settlement[];
   settings: AppSettings;
   onDataImported: (data: { expenses: Expense[]; settlements: Settlement[]; settings: AppSettings }) => void;
-  onReloadFromBackend: () => Promise<void>;
+  onReloadFromBackend?: () => Promise<void>;
+  onClearAllData?: () => void;
   isBackendConnected: boolean;
   isDeveloper?: boolean;
 }
@@ -26,14 +27,14 @@ export const ExcelDatabaseModal: React.FC<ExcelDatabaseModalProps> = ({
   settlements,
   settings,
   onDataImported,
-  onReloadFromBackend,
-  isBackendConnected,
+  onClearAllData,
   isDeveloper = false,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [isReloading, setIsReloading] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isDownloadingUsers, setIsDownloadingUsers] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -49,6 +50,22 @@ export const ExcelDatabaseModal: React.FC<ExcelDatabaseModalProps> = ({
       setMessage({ type: 'error', text: err.message || 'Failed to download users.xlsx' });
     } finally {
       setIsDownloadingUsers(false);
+    }
+  };
+
+  const handleClearAll = async () => {
+    setIsClearing(true);
+    setMessage(null);
+    try {
+      if (onClearAllData) {
+        onClearAllData();
+      }
+      setShowClearConfirm(false);
+      setMessage({ type: 'success', text: 'All expenses and database transactions have been cleared!' });
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Failed to clear database' });
+    } finally {
+      setIsClearing(false);
     }
   };
 
@@ -73,9 +90,9 @@ export const ExcelDatabaseModal: React.FC<ExcelDatabaseModalProps> = ({
     }
   };
 
-  const handleDownloadTemplate = () => {
+  const handleDownloadTemplate = async () => {
     try {
-      triggerExcelTemplateDownload(settings);
+      await triggerExcelTemplateDownload(settings);
       setMessage({ type: 'success', text: 'Blank Excel template (expenses_template.xlsx) downloaded!' });
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to download blank template' });
@@ -98,39 +115,40 @@ export const ExcelDatabaseModal: React.FC<ExcelDatabaseModalProps> = ({
       // Update local state and trigger app refresh
       onDataImported(parsed);
       
-      setMessage({
-        type: 'success',
-        text: `Successfully replaced database with "${file.name}"! Old data cleared. Loaded ${parsed.expenses.length} expenses and ${parsed.settlements.length} settlements synchronized across all devices in real-time.`,
-      });
+      if (parsed.expenses.length === 0 && parsed.settlements.length === 0) {
+        setMessage({
+          type: 'error',
+          text: `No valid data rows found in "${file.name}". Please ensure all required columns have values.`,
+        });
+      } else {
+        setMessage({
+          type: 'success',
+          text: `All data added successfully! Saved ${parsed.expenses.length} expense${parsed.expenses.length === 1 ? '' : 's'}${parsed.settlements.length > 0 ? ` and ${parsed.settlements.length} settlement${parsed.settlements.length === 1 ? '' : 's'}` : ''} to database.`,
+        });
+      }
     } catch (err: any) {
       console.error('Excel upload error:', err);
       // Fallback to standard importer if cloud fails
       try {
         const parsed = await importExcelFile(file, settings);
         onDataImported(parsed);
-        setMessage({
-          type: 'success',
-          text: `Loaded ${parsed.expenses.length} expenses and ${parsed.settlements.length} settlements from "${file.name}".`,
-        });
+        if (parsed.expenses.length === 0 && parsed.settlements.length === 0) {
+          setMessage({
+            type: 'error',
+            text: `No valid data rows found in "${file.name}". Please ensure all required columns have values.`,
+          });
+        } else {
+          setMessage({
+            type: 'success',
+            text: `All data added successfully! Saved ${parsed.expenses.length} expense${parsed.expenses.length === 1 ? '' : 's'}${parsed.settlements.length > 0 ? ` and ${parsed.settlements.length} settlement${parsed.settlements.length === 1 ? '' : 's'}` : ''} to database.`,
+          });
+        }
       } catch (fallbackErr: any) {
         setMessage({ type: 'error', text: `Failed to import Excel file: ${fallbackErr.message}` });
       }
     } finally {
       setIsImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
-  const handleReload = async () => {
-    setIsReloading(true);
-    setMessage(null);
-    try {
-      await onReloadFromBackend();
-      setMessage({ type: 'success', text: 'Reloaded latest data from expenses.xlsx on server!' });
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'Could not reload from server' });
-    } finally {
-      setIsReloading(false);
     }
   };
 
@@ -205,7 +223,7 @@ export const ExcelDatabaseModal: React.FC<ExcelDatabaseModalProps> = ({
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
             <div className="flex items-center gap-1.5 font-bold text-slate-800 text-xs">
               <Database className="w-3.5 h-3.5 text-slate-500" />
-              <span>Current Cloud Database Records</span>
+              <span>Current Records</span>
             </div>
 
             <div className="grid grid-cols-3 gap-2 text-center">
@@ -256,48 +274,77 @@ export const ExcelDatabaseModal: React.FC<ExcelDatabaseModalProps> = ({
               className="w-full py-3 px-4 rounded-xl font-bold text-xs bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm flex items-center justify-center gap-2 active:scale-98 transition-all disabled:opacity-60"
             >
               <Download className="w-4 h-4" />
-              <span>{isDownloading ? 'Generating Excel Spreadsheet...' : 'Download Current Database (.xlsx)'}</span>
+              <span>{isDownloading ? 'Generating Excel ...' : 'Download Current Data (.xlsx)'}</span>
             </button>
 
-            {/* Download Blank Template */}
-            <button
-              type="button"
-              onClick={handleDownloadTemplate}
-              className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center justify-center gap-2 active:scale-98 transition-all"
-            >
-              <FileDown className="w-4 h-4 text-emerald-600" />
-              <span>Download Blank Template (No Data)</span>
-            </button>
-
-            {/* Upload / Replace Button */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx, .xls"
-              onChange={handleFileChange}
-              className="hidden"
-            />
-            <button
-              type="button"
-              disabled={isImporting}
-              onClick={() => fileInputRef.current?.click()}
-              className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-slate-100 hover:bg-slate-200 text-slate-800 flex items-center justify-center gap-2 active:scale-98 transition-all disabled:opacity-50"
-            >
-              <Upload className="w-4 h-4 text-slate-600" />
-              <span>{isImporting ? 'Clearing Old & Saving Excel to Cloud...' : 'Upload Excel File (Replaces All Data)'}</span>
-            </button>
-
-            {/* Reload from server button */}
-            {isBackendConnected && (
+            {/* Download Blank Template & Upload Buttons in One Row with Two Columns */}
+            <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
-                disabled={isReloading}
-                onClick={handleReload}
-                className="w-full py-2 px-4 rounded-xl font-medium text-xs text-slate-600 hover:bg-slate-100 flex items-center justify-center gap-1.5 transition-colors"
+                onClick={handleDownloadTemplate}
+                className="py-2.5 px-3 rounded-xl font-bold text-xs bg-blue-600 hover:bg-blue-700 text-white shadow-sm flex items-center justify-center gap-1.5 active:scale-98 transition-all cursor-pointer"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${isReloading ? 'animate-spin text-emerald-600' : ''}`} />
-                <span>{isReloading ? 'Reloading...' : 'Reload from expenses.xlsx backup'}</span>
+                <FileDown className="w-4 h-4 shrink-0 text-white" />
+                <span className="truncate">Download Template</span>
               </button>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx, .xls"
+                onChange={handleFileChange}
+                className="hidden"
+              />
+              <button
+                type="button"
+                disabled={isImporting}
+                onClick={() => fileInputRef.current?.click()}
+                className="py-2.5 px-3 rounded-xl font-bold text-xs bg-violet-600 hover:bg-violet-700 text-white shadow-sm flex items-center justify-center gap-1.5 active:scale-98 transition-all disabled:opacity-50 cursor-pointer"
+              >
+                <Upload className="w-4 h-4 shrink-0 text-white" />
+                <span className="truncate">{isImporting ? 'Uploading...' : 'Upload Template'}</span>
+              </button>
+            </div>
+
+            {/* Clear all expenses button - Developer Only */}
+            {isDeveloper && (
+              <div className="pt-1">
+                {!showClearConfirm ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowClearConfirm(true)}
+                    className="w-full py-2 px-4 rounded-xl font-medium text-xs text-rose-600 hover:bg-rose-50 border border-rose-200/80 hover:border-rose-300 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                    <span>Clear All Expenses Data</span>
+                  </button>
+                ) : (
+                  <div className="p-3 bg-rose-50/90 border border-rose-200 rounded-xl space-y-2 animate-in fade-in duration-150">
+                    <p className="text-[11px] font-semibold text-rose-900 text-center">
+                      Are you sure? This will delete all expenses and settlement records in the database.
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        disabled={isClearing}
+                        onClick={handleClearAll}
+                        className="flex-1 py-1.5 px-3 bg-rose-600 hover:bg-rose-700 active:scale-98 text-white rounded-lg text-xs font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>{isClearing ? 'Clearing...' : 'Yes, Clear All'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isClearing}
+                        onClick={() => setShowClearConfirm(false)}
+                        className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </div>
 
@@ -335,7 +382,7 @@ export const ExcelDatabaseModal: React.FC<ExcelDatabaseModalProps> = ({
               Excel Structure & Blank Template
             </p>
             <ul className="list-disc pl-4 space-y-0.5 text-[10px]">
-              <li><strong>Expenses tab:</strong> ID, Date, Category, Scope, Original Amount, Currency, Total Amount, Paid By, Split Among, Notes (recorded when category is <em>Others</em>).</li>
+              <li><strong>Expenses tab:</strong> Created Date, Category, Scope, Original Amount, Original Currency, Paid By, Paid By ID, Split Among, Split Among ID, Notes (only saved when category is <em>other</em>).</li>
               <li><strong>Settlements tab:</strong> Log of all settled payments between group members.</li>
               <li><strong>Members & Settings tab:</strong> Group members and default currency configuration.</li>
               <li><strong>Upload behavior:</strong> When you upload an Excel file, old cloud database data is cleared and replaced immediately across all users.</li>

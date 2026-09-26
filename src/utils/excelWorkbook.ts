@@ -1,9 +1,12 @@
 import * as xlsxModule from 'xlsx';
 import type { WorkBook, WorkSheet } from 'xlsx';
+import ExcelJS from 'exceljs';
 import { Expense, Settlement, AppSettings, UserMember, ExpenseCategory } from '../types';
 import { calculateBalanceSummary, calculateAllIndividualMemberFinancials, normalizePayerId, IndividualMemberFinancials } from './calculations';
 import { CATEGORIES } from './categoryMeta';
 import { DEFAULT_MEMBERS } from './initialData';
+import { getCurrencyMeta, SUPPORTED_CURRENCIES } from './currencyConstants';
+import { getConversionRate } from './currencyUtils';
 
 const XLSX = (xlsxModule as any).default || xlsxModule;
 
@@ -198,85 +201,139 @@ export function buildExcelWorkbook(payload: ExcelDatabasePayload): WorkBook {
     return found ? found.name : id;
   };
 
-  // 1. Expenses Sheet (No Title column, Notes only for 'other' category)
+  // 1. Expenses Sheet (Exact 10 columns matching Download Template)
   const expenseRows = expenses.map(exp => {
     const normPayerId = normalizePayerId(exp.paidBy, mainUserId, members);
     const payerName = getMemberName(normPayerId);
     const splitIds = (exp.splitAmong && exp.splitAmong.length > 0 ? exp.splitAmong : members.map(m => m.id))
       .map(id => normalizePayerId(id, mainUserId, members));
     const splitNames = splitIds.map(getMemberName).join(', ');
+    const expDate = exp.date || (exp.createdAt ? new Date(exp.createdAt).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
 
     return {
-      'ID': exp.id,
-      'Date': exp.date,
+      'Created Date': expDate,
       'Category': exp.category,
       'Scope': exp.expenseScope || (exp.splitType === 'personal' ? 'personal' : 'shared'),
       'Original Amount': exp.originalAmount !== undefined ? Number(exp.originalAmount.toFixed(2)) : Number(exp.amount.toFixed(2)),
-      'Original Currency': exp.originalCurrency || settings.currencyCode,
-      'Original Symbol': exp.originalCurrencySymbol || settings.currencySymbol,
-      'Exchange Rate': exp.exchangeRate !== undefined ? Number(exp.exchangeRate.toFixed(4)) : 1.0,
-      'Total Amount': Number(exp.amount.toFixed(2)),
+      'Original Currency': exp.originalCurrency || settings.currencyCode || 'SGD',
       'Paid By': payerName,
-      'Paid By ID': normPayerId,
+      'Paid By ID (Auto - Do Not Edit)': normPayerId,
       'Split Among': splitNames,
-      'Split Among IDs': splitIds.join(','),
-      'Split Type': exp.splitType || 'equal',
-      'Notes': exp.category === 'other' ? (exp.notes || '') : '',
-      'Created Date': new Date(exp.createdAt).toISOString(),
+      'Split Among ID (Auto - Do Not Edit)': splitIds.join(','),
+      'Notes (Optional - Saved only if Category is other)': exp.category === 'other' ? (exp.notes || '') : '',
     };
   });
 
   const expensesWs = XLSX.utils.json_to_sheet(expenseRows);
   expensesWs['!cols'] = [
-    { wch: 16 }, // ID
-    { wch: 12 }, // Date
-    { wch: 14 }, // Category
-    { wch: 12 }, // Scope
-    { wch: 15 }, // Original Amount
-    { wch: 16 }, // Original Currency
-    { wch: 15 }, // Original Symbol
-    { wch: 14 }, // Exchange Rate
-    { wch: 16 }, // Total Amount
-    { wch: 16 }, // Paid By
-    { wch: 14 }, // Paid By ID
-    { wch: 26 }, // Split Among
-    { wch: 20 }, // Split Among IDs
-    { wch: 14 }, // Split Type
-    { wch: 28 }, // Notes
-    { wch: 22 }, // Created Date
+    { wch: 18 }, // Created Date
+    { wch: 16 }, // Category
+    { wch: 14 }, // Scope
+    { wch: 18 }, // Original Amount
+    { wch: 18 }, // Original Currency
+    { wch: 18 }, // Paid By
+    { wch: 30 }, // Paid By ID (Auto - Do Not Edit)
+    { wch: 30 }, // Split Among
+    { wch: 34 }, // Split Among ID (Auto - Do Not Edit)
+    { wch: 44 }, // Notes (Optional - Saved only if Category is other)
   ];
+  expensesWs['!autofilter'] = { ref: 'A1:J1' };
   XLSX.utils.book_append_sheet(wb, expensesWs, 'Expenses');
 
-  // 2. Settlements Sheet
+  // 2. Settlements Sheet (Exact columns matching template)
   const settlementRows = settlements.map(set => {
     const normPayerId = normalizePayerId(set.paidBy, mainUserId, members);
     const normReceiverId = normalizePayerId(set.paidTo || mainUserId, mainUserId, members);
     return {
-      'ID': set.id,
       'Payment Date': set.date,
       'Amount': Number(set.amount.toFixed(2)),
       'Paid By': getMemberName(normPayerId),
-      'Paid By ID': normPayerId,
+      'Paid By ID (Auto - Do Not Edit)': normPayerId,
       'Paid To': getMemberName(normReceiverId),
-      'Paid To ID': normReceiverId,
+      'Paid To ID (Auto - Do Not Edit)': normReceiverId,
       'Notes': set.notes || '',
-      'Created Date': new Date(set.createdAt).toISOString(),
+      'Created Date': set.createdAt ? new Date(set.createdAt).toISOString() : new Date().toISOString(),
     };
   });
 
   const settlementsWs = XLSX.utils.json_to_sheet(settlementRows);
   settlementsWs['!cols'] = [
-    { wch: 16 },
-    { wch: 14 }, // Payment Date
+    { wch: 16 }, // Payment Date
     { wch: 14 }, // Amount
-    { wch: 16 }, // Paid By
-    { wch: 14 }, // Paid By ID
-    { wch: 16 }, // Paid To
-    { wch: 14 }, // Paid To ID
-    { wch: 25 },
-    { wch: 22 },
+    { wch: 18 }, // Paid By
+    { wch: 30 }, // Paid By ID (Auto - Do Not Edit)
+    { wch: 18 }, // Paid To
+    { wch: 30 }, // Paid To ID (Auto - Do Not Edit)
+    { wch: 28 }, // Notes
+    { wch: 22 }, // Created Date
   ];
+  settlementsWs['!autofilter'] = { ref: 'A1:H1' };
   XLSX.utils.book_append_sheet(wb, settlementsWs, 'Settlements');
+
+  // 3. Users Sheet (Ensures team members and roles are perfectly restored on re-upload)
+  const userRows: any[][] = [['Name', 'Member ID', 'Role']];
+  for (const m of members) {
+    userRows.push([m.name, m.id, m.id === mainUserId ? 'Main User' : 'Member']);
+  }
+  const usersWs = XLSX.utils.aoa_to_sheet(userRows);
+  usersWs['!cols'] = [{ wch: 20 }, { wch: 18 }, { wch: 16 }];
+  usersWs['!autofilter'] = { ref: 'A1:C1' };
+  XLSX.utils.book_append_sheet(wb, usersWs, 'Users');
+
+  // 4. Reference_Data Sheet
+  const categoryList = [
+    { code: 'meal', name: 'Meals & Dining', desc: 'Dining, lunch, dinner, drinks, cafe' },
+    { code: 'groceries', name: 'Groceries', desc: 'Supermarket, food ingredients, daily produce' },
+    { code: 'transport', name: 'Transport & Rides', desc: 'Grab, taxi, fuel, tolls, train, bus' },
+    { code: 'entertainment', name: 'Entertainment', desc: 'Outings, movies, tickets, attractions' },
+    { code: 'daily', name: 'Daily Supplies', desc: 'Household essentials, toiletries' },
+    { code: 'utilities', name: 'Bills & Utilities', desc: 'WiFi, mobile, electricity, shared bills' },
+    { code: 'other', name: 'Other Expense', desc: 'Miscellaneous items (specify in notes)' },
+  ];
+  const scopeList = ['shared', 'personal'];
+  const currencyList = SUPPORTED_CURRENCIES;
+  const splitCombinations = generateSplitAmongCombinations(members);
+
+  const maxLen = Math.max(
+    categoryList.length,
+    scopeList.length,
+    currencyList.length,
+    splitCombinations.length
+  );
+
+  const refRows: any[][] = [
+    ['Category Code', 'Category Name', 'Description', 'Scope', 'Currency Code', 'Currency Name', 'Symbol', 'Split Among Option', 'Split Among IDs']
+  ];
+
+  for (let i = 0; i < maxLen; i++) {
+    const cat = categoryList[i];
+    const sc = scopeList[i];
+    const cur = currencyList[i];
+    const comb = splitCombinations[i];
+    refRows.push([
+      cat ? cat.code : '',
+      cat ? cat.name : '',
+      cat ? cat.desc : '',
+      sc || '',
+      cur ? cur.code : '',
+      cur ? cur.label : '',
+      cur ? cur.symbol : '',
+      comb ? comb.option : '',
+      comb ? comb.ids : '',
+    ]);
+  }
+  const refWs = XLSX.utils.aoa_to_sheet(refRows);
+  refWs['!cols'] = [
+    { wch: 16 }, { wch: 20 }, { wch: 32 }, { wch: 14 },
+    { wch: 16 }, { wch: 22 }, { wch: 12 }, { wch: 28 }, { wch: 28 }
+  ];
+  refWs['!autofilter'] = { ref: 'A1:I1' };
+  XLSX.utils.book_append_sheet(wb, refWs, 'Reference_Data');
+
+  // 5. Summary Sheet
+  const memberStats = calculateAllIndividualMemberFinancials(expenses, settlements, settings);
+  const summaryWs = buildSummaryWorksheet(payload, memberStats);
+  XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
 
   return wb;
 }
@@ -342,8 +399,80 @@ export function buildUsersExcelWorkbook(
   return wb;
 }
 
+export interface SplitAmongOption {
+  option: string;
+  ids: string;
+}
+
 /**
- * Builds a clean, empty Excel template with all header columns defined and no data rows.
+ * Generates options for Split Among supporting:
+ * - "All Members"
+ * - 1 member (each member individually)
+ * - 2 members (all pairwise combinations)
+ * - 3 members (groups of three)
+ * - up to all members
+ */
+export function generateSplitAmongCombinations(members: UserMember[]): SplitAmongOption[] {
+  const result: SplitAmongOption[] = [];
+
+  // 1. "All Members" option
+  result.push({
+    option: 'All Members',
+    ids: 'ALL',
+  });
+
+  // 2. Single member options (1 member)
+  for (const m of members) {
+    result.push({
+      option: m.name,
+      ids: m.id,
+    });
+  }
+
+  // Combinations helper for 2, 3, etc. members
+  function getCombinations<T>(arr: T[], k: number): T[][] {
+    if (k === 0) return [[]];
+    if (arr.length === 0) return [];
+    const [head, ...tail] = arr;
+    const withHead = getCombinations(tail, k - 1).map(c => [head, ...c]);
+    const withoutHead = getCombinations(tail, k);
+    return [...withHead, ...withoutHead];
+  }
+
+  for (let k = 2; k <= Math.min(members.length, 6); k++) {
+    if (k === members.length && members.length > 1) {
+      const allNames = members.map(m => m.name).join(', ');
+      const allIds = members.map(m => m.id).join(',');
+      if (!result.some(r => r.option === allNames)) {
+        result.push({
+          option: allNames,
+          ids: allIds,
+        });
+      }
+      continue;
+    }
+
+    const combos = getCombinations(members, k);
+    for (const group of combos) {
+      const optionName = group.map(m => m.name).join(', ');
+      const optionIds = group.map(m => m.id).join(',');
+      if (!result.some(r => r.option === optionName)) {
+        result.push({
+          option: optionName,
+          ids: optionIds,
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Builds a user-friendly, structured Excel template with exactly 10 columns in Expenses:
+ * [Created Date, Category, Scope, Original Amount, Original Currency, Paid By, Paid By ID (Auto - Do Not Edit), Split Among, Split Among ID (Auto - Do Not Edit), Notes (Optional - Saved only if Category is other)]
+ * - No background fill in data rows (plain text color only, red text on the two ID fields).
+ * - Split among options support 1 member, 2 members, 3 members, or all members.
  */
 export function buildBlankExcelTemplate(settings: AppSettings): WorkBook {
   const wb = XLSX.utils.book_new();
@@ -352,34 +481,490 @@ export function buildBlankExcelTemplate(settings: AppSettings): WorkBook {
     ? settings.members
     : DEFAULT_MEMBERS;
   const mainUserId = settings.mainUserId || members[0]?.id || '10001';
+  const mainMember = members.find(m => m.id === mainUserId) || members[0];
+  const activeCurrency = settings.currencyCode || 'MYR';
+  const todayStr = new Date().toISOString().split('T')[0];
 
-  // 1. Expenses Sheet (Empty with exact column headers)
-  const expensesWs = XLSX.utils.aoa_to_sheet([
-    ['ID', 'Date', 'Category', 'Scope', 'Original Amount', 'Original Currency', 'Original Symbol', 'Exchange Rate', 'Total Amount', 'Paid By', 'Paid By ID', 'Split Among', 'Split Among IDs', 'Split Type', 'Notes', 'Created Date'],
-  ]);
-  expensesWs['!cols'] = [
-    { wch: 16 }, { wch: 12 }, { wch: 14 }, { wch: 12 },
-    { wch: 15 }, { wch: 16 }, { wch: 15 }, { wch: 14 },
-    { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 26 },
-    { wch: 20 }, { wch: 14 }, { wch: 28 }, { wch: 22 },
+  // 1. Expenses Sheet (Exactly the 10 requested columns)
+  const headerCols = [
+    'Created Date',
+    'Category',
+    'Scope',
+    'Original Amount',
+    'Original Currency',
+    'Paid By',
+    'Paid By ID (Auto - Do Not Edit)',
+    'Split Among',
+    'Split Among ID (Auto - Do Not Edit)',
+    'Notes (Optional - Saved only if Category is other)',
   ];
+
+  // Only ONE example row (Row 2) - no background fill
+  const expenseRows: any[][] = [
+    headerCols,
+    [
+      todayStr,
+      'meal',
+      'shared',
+      50.00,
+      activeCurrency,
+      mainMember.name,
+      { t: 's', f: 'IFERROR(VLOOKUP(F2, Users!$A$2:$B$50, 2, FALSE), "")', v: mainMember.id },
+      'All Members',
+      { t: 's', f: 'IFERROR(VLOOKUP(H2, Reference_Data!$H$2:$I$150, 2, FALSE), IF(H2="All Members", "ALL", ""))', v: 'ALL' },
+      '',
+    ],
+  ];
+
+  // Blank rows for user entry (rows 3 to 30) - no fill
+  for (let r = 3; r <= 30; r++) {
+    expenseRows.push([
+      '',
+      '',
+      'shared',
+      '',
+      activeCurrency,
+      '',
+      { t: 's', f: `IFERROR(VLOOKUP(F${r}, Users!$A$2:$B$50, 2, FALSE), "")`, v: '' },
+      'All Members',
+      { t: 's', f: `IFERROR(VLOOKUP(H${r}, Reference_Data!$H$2:$I$150, 2, FALSE), IF(H${r}="All Members", "ALL", ""))`, v: 'ALL' },
+      '',
+    ]);
+  }
+
+  const expensesWs = XLSX.utils.aoa_to_sheet(expenseRows);
+  expensesWs['!cols'] = [
+    { wch: 18 }, // Created Date
+    { wch: 16 }, // Category
+    { wch: 14 }, // Scope
+    { wch: 18 }, // Original Amount
+    { wch: 18 }, // Original Currency
+    { wch: 18 }, // Paid By
+    { wch: 30 }, // Paid By ID (Auto - Do Not Edit)
+    { wch: 30 }, // Split Among
+    { wch: 34 }, // Split Among ID (Auto - Do Not Edit)
+    { wch: 44 }, // Notes (Optional - Saved only if Category is other)
+  ];
+  expensesWs['!autofilter'] = { ref: 'A1:J1' };
   XLSX.utils.book_append_sheet(wb, expensesWs, 'Expenses');
 
-  // 2. Settlements Sheet (Empty with exact column headers)
+  // 2. Users Sheet (Database table for VLOOKUP and filter reference)
+  const userRows: any[][] = [['Name', 'Member ID', 'Role']];
+  for (const m of members) {
+    userRows.push([m.name, m.id, m.id === mainUserId ? 'Main User' : 'Member']);
+  }
+  const usersWs = XLSX.utils.aoa_to_sheet(userRows);
+  usersWs['!cols'] = [{ wch: 20 }, { wch: 16 }, { wch: 16 }];
+  usersWs['!autofilter'] = { ref: 'A1:C1' };
+  XLSX.utils.book_append_sheet(wb, usersWs, 'Users');
+
+  // 3. Reference_Data Sheet (Without split type column)
+  const categoryList = [
+    { code: 'meal', name: 'Meals & Dining', desc: 'Dining, lunch, dinner, drinks, cafe' },
+    { code: 'groceries', name: 'Groceries', desc: 'Supermarket, food ingredients, daily produce' },
+    { code: 'transport', name: 'Transport & Rides', desc: 'Grab, taxi, fuel, tolls, train, bus' },
+    { code: 'entertainment', name: 'Entertainment', desc: 'Outings, movies, tickets, attractions' },
+    { code: 'daily', name: 'Daily Supplies', desc: 'Household essentials, toiletries' },
+    { code: 'utilities', name: 'Bills & Utilities', desc: 'WiFi, mobile, electricity, shared bills' },
+    { code: 'other', name: 'Other Expense', desc: 'Miscellaneous items (specify in notes)' },
+  ];
+  const scopeList = ['shared', 'personal'];
+  const currencyList = SUPPORTED_CURRENCIES;
+  const splitCombinations = generateSplitAmongCombinations(members);
+
+  const maxLen = Math.max(
+    categoryList.length,
+    scopeList.length,
+    currencyList.length,
+    splitCombinations.length
+  );
+
+  const refRows: any[][] = [
+    ['Category Code', 'Category Name', 'Description', 'Scope', 'Currency Code', 'Currency Name', 'Symbol', 'Split Among Option', 'Split Among IDs']
+  ];
+
+  for (let i = 0; i < maxLen; i++) {
+    const cat = categoryList[i];
+    const sc = scopeList[i];
+    const cur = currencyList[i];
+    const comb = splitCombinations[i];
+    refRows.push([
+      cat ? cat.code : '',
+      cat ? cat.name : '',
+      cat ? cat.desc : '',
+      sc || '',
+      cur ? cur.code : '',
+      cur ? cur.label : '',
+      cur ? cur.symbol : '',
+      comb ? comb.option : '',
+      comb ? comb.ids : '',
+    ]);
+  }
+  const refWs = XLSX.utils.aoa_to_sheet(refRows);
+  refWs['!cols'] = [
+    { wch: 16 }, { wch: 20 }, { wch: 32 }, { wch: 14 },
+    { wch: 16 }, { wch: 22 }, { wch: 12 }, { wch: 28 }, { wch: 28 }
+  ];
+  refWs['!autofilter'] = { ref: 'A1:I1' };
+  XLSX.utils.book_append_sheet(wb, refWs, 'Reference_Data');
+
+  // 4. Settlements Sheet (Clean template for repayments)
   const settlementsWs = XLSX.utils.aoa_to_sheet([
-    ['ID', 'Payment Date', 'Amount', 'Paid By', 'Paid By ID', 'Paid To', 'Paid To ID', 'Notes', 'Created Date'],
+    ['Payment Date', 'Amount', 'Paid By', 'Paid By ID (Auto - Do Not Edit)', 'Paid To', 'Paid To ID (Auto - Do Not Edit)', 'Notes', 'Created Date'],
   ]);
   settlementsWs['!cols'] = [
-    { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 16 },
-    { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 25 }, { wch: 22 },
+    { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 28 },
+    { wch: 16 }, { wch: 28 }, { wch: 25 }, { wch: 22 },
   ];
+  settlementsWs['!autofilter'] = { ref: 'A1:H1' };
   XLSX.utils.book_append_sheet(wb, settlementsWs, 'Settlements');
 
   return wb;
 }
 
 /**
- * Parses an XLSX workbook into typed expenses, settlements, members, and settings
+ * Builds a user-friendly, high-fidelity Excel template with ExcelJS:
+ * - Exactly 10 columns: Created Date, Category, Scope, Original Amount, Currency, Paid By, Paid By ID, Split Among, Split Among ID, Notes
+ * - No background fill in data rows (plain text color only, red text on the two ID fields)
+ * - Headers keep uniform dark header background
+ * - Split Among supports 1 member, 2 members, 3 members, or all members
+ */
+export async function generateBlankExcelTemplateBuffer(settings: AppSettings): Promise<Uint8Array> {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Friend Expense Splitter';
+  wb.created = new Date();
+
+  const members = settings.members && settings.members.length > 0
+    ? settings.members
+    : DEFAULT_MEMBERS;
+  const mainUserId = settings.mainUserId || members[0]?.id || '10001';
+  const mainMember = members.find(m => m.id === mainUserId) || members[0];
+  const activeCurrency = settings.currencyCode || 'MYR';
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  // 1. Expenses Sheet (The 10-column user entry sheet - Date and Split Type removed)
+  const expWs = wb.addWorksheet('Expenses', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+
+  expWs.columns = [
+    { header: 'Created Date', key: 'createdDate', width: 18 },
+    { header: 'Category', key: 'category', width: 16 },
+    { header: 'Scope', key: 'scope', width: 14 },
+    { header: 'Original Amount', key: 'origAmount', width: 18 },
+    { header: 'Original Currency', key: 'origCurrency', width: 18 },
+    { header: 'Paid By', key: 'paidBy', width: 18 },
+    { header: 'Paid By ID (Auto - Do Not Edit)', key: 'paidById', width: 30 },
+    { header: 'Split Among', key: 'splitAmong', width: 30 },
+    { header: 'Split Among ID (Auto - Do Not Edit)', key: 'splitAmongId', width: 34 },
+    { header: 'Notes (Optional - Saved only if Category is other)', key: 'notes', width: 44 },
+  ];
+
+  expWs.autoFilter = { from: 'A1', to: 'J1' };
+
+  // Style Header Row (Uniform dark slate background, no changing color)
+  const expHeaderRow = expWs.getRow(1);
+  expHeaderRow.height = 28;
+  expHeaderRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF1E293B' }, // Slate-800
+    };
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+      bottom: { style: 'medium', color: { argb: 'FF0F172A' } },
+      left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+      right: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+    };
+  });
+
+  // 2. Users Sheet (Database table for lookups)
+  const usersWs = wb.addWorksheet('Users');
+  usersWs.columns = [
+    { header: 'Name', key: 'name', width: 22 },
+    { header: 'Member ID', key: 'id', width: 18 },
+    { header: 'Role', key: 'role', width: 16 },
+  ];
+  usersWs.autoFilter = { from: 'A1', to: 'C1' };
+
+  const usersHeaderRow = usersWs.getRow(1);
+  usersHeaderRow.height = 24;
+  usersHeaderRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0F766E' },
+    };
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
+  });
+
+  for (const m of members) {
+    const isMain = m.id === mainUserId;
+    const r = usersWs.addRow({
+      name: m.name,
+      id: m.id,
+      role: isMain ? 'Main User' : 'Member',
+    });
+    r.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
+    r.getCell('id').alignment = { vertical: 'middle', horizontal: 'center' };
+    r.getCell('role').alignment = { vertical: 'middle', horizontal: 'center' };
+  }
+
+  // 3. Reference_Data Sheet (Reference tables for dropdown filters & combinations)
+  const refWs = wb.addWorksheet('Reference_Data');
+  refWs.columns = [
+    { header: 'Category Code', key: 'catCode', width: 16 },
+    { header: 'Category Name', key: 'catName', width: 20 },
+    { header: 'Description', key: 'catDesc', width: 32 },
+    { header: 'Scope', key: 'scope', width: 14 },
+    { header: 'Currency Code', key: 'currCode', width: 16 },
+    { header: 'Currency Name', key: 'currName', width: 22 },
+    { header: 'Symbol', key: 'currSymbol', width: 12 },
+    { header: 'Split Among Option', key: 'splitOption', width: 28 },
+    { header: 'Split Among IDs', key: 'splitIds', width: 28 },
+  ];
+  refWs.autoFilter = { from: 'A1', to: 'I1' };
+
+  const refHeaderRow = refWs.getRow(1);
+  refHeaderRow.height = 24;
+  refHeaderRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF334155' },
+    };
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
+  });
+
+  const categoryList = [
+    { code: 'meal', name: 'Meals & Dining', desc: 'Dining, lunch, dinner, drinks, cafe' },
+    { code: 'groceries', name: 'Groceries', desc: 'Supermarket, food ingredients, daily produce' },
+    { code: 'transport', name: 'Transport & Rides', desc: 'Grab, taxi, fuel, tolls, train, bus' },
+    { code: 'entertainment', name: 'Entertainment', desc: 'Outings, movies, tickets, attractions' },
+    { code: 'daily', name: 'Daily Supplies', desc: 'Household essentials, toiletries' },
+    { code: 'utilities', name: 'Bills & Utilities', desc: 'WiFi, mobile, electricity, shared bills' },
+    { code: 'other', name: 'Other Expense', desc: 'Miscellaneous items (specify in notes)' },
+  ];
+  const scopeList = ['shared', 'personal'];
+  const currencyList = SUPPORTED_CURRENCIES;
+  const splitCombinations = generateSplitAmongCombinations(members);
+
+  const maxLen = Math.max(
+    categoryList.length,
+    scopeList.length,
+    currencyList.length,
+    splitCombinations.length
+  );
+
+  for (let i = 0; i < maxLen; i++) {
+    const cat = categoryList[i];
+    const sc = scopeList[i];
+    const cur = currencyList[i];
+    const comb = splitCombinations[i];
+
+    refWs.addRow({
+      catCode: cat ? cat.code : '',
+      catName: cat ? cat.name : '',
+      catDesc: cat ? cat.desc : '',
+      scope: sc || '',
+      currCode: cur ? cur.code : '',
+      currName: cur ? cur.label : '',
+      currSymbol: cur ? cur.symbol : '',
+      splitOption: comb ? comb.option : '',
+      splitIds: comb ? comb.ids : '',
+    });
+  }
+
+  // Ranges for Dropdown Validation
+  const userRange = `Users!$A$2:$A$${members.length + 1}`;
+  const categoryRange = `Reference_Data!$A$2:$A$${categoryList.length + 1}`;
+  const currencyRange = `Reference_Data!$E$2:$E$${currencyList.length + 1}`;
+  const splitAmongRange = `Reference_Data!$H$2:$H$${splitCombinations.length + 1}`;
+
+  // EXACTLY ONE EXAMPLE ROW (Row 2) - NO background fill (plain text color only, red text on ID columns)
+  const sampleRow = expWs.addRow({
+    createdDate: todayStr,
+    category: 'meal',
+    scope: 'shared',
+    origAmount: 50.00,
+    origCurrency: activeCurrency,
+    paidBy: mainMember.name,
+    splitAmong: 'All Members',
+    notes: '',
+  });
+
+  sampleRow.getCell('paidById').value = {
+    formula: 'IFERROR(VLOOKUP(F2, Users!$A$2:$B$50, 2, FALSE), "")',
+    result: mainMember.id,
+  };
+  sampleRow.getCell('splitAmongId').value = {
+    formula: 'IFERROR(VLOOKUP(H2, Reference_Data!$H$2:$I$150, 2, FALSE), IF(H2="All Members", "ALL", ""))',
+    result: 'ALL',
+  };
+  sampleRow.getCell('origAmount').numFmt = '#,##0.00';
+
+  // Apply Plain Text styling (NO background fill for any cell)
+  sampleRow.height = 22;
+  sampleRow.eachCell((cell, colNumber) => {
+    cell.alignment = { vertical: 'middle' };
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+      bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+      left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+      right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+    };
+
+    if (colNumber === 7 || colNumber === 9) {
+      // Red text color to advise user not to edit
+      cell.font = {
+        bold: true,
+        color: { argb: 'FFDC2626' }, // Red-600
+        size: 10.5,
+      };
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    } else {
+      cell.font = {
+        color: { argb: 'FF0F172A' },
+        size: 10.5,
+      };
+    }
+  });
+
+  // Clean Blank Rows (rows 3 to 60) for user to enter data (NO background fill)
+  for (let r = 3; r <= 60; r++) {
+    const blankRow = expWs.addRow({
+      createdDate: '',
+      category: '',
+      scope: 'shared',
+      origAmount: '',
+      origCurrency: activeCurrency,
+      paidBy: '',
+      splitAmong: 'All Members',
+      notes: '',
+    });
+
+    blankRow.height = 20;
+
+    // Formulas for auto-updating IDs with Red text color and NO fill
+    const paidByIdCell = blankRow.getCell('paidById');
+    paidByIdCell.value = {
+      formula: `IFERROR(VLOOKUP(F${r}, Users!$A$2:$B$50, 2, FALSE), "")`,
+    };
+    paidByIdCell.font = { color: { argb: 'FFDC2626' }, bold: true };
+    paidByIdCell.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    const splitAmongIdCell = blankRow.getCell('splitAmongId');
+    splitAmongIdCell.value = {
+      formula: `IFERROR(VLOOKUP(H${r}, Reference_Data!$H$2:$I$150, 2, FALSE), IF(H${r}="All Members", "ALL", ""))`,
+    };
+    splitAmongIdCell.font = { color: { argb: 'FFDC2626' }, bold: true };
+    splitAmongIdCell.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    blankRow.getCell('origAmount').numFmt = '#,##0.00';
+  }
+
+  // Set Data Validation on rows 2 through 60
+  for (let r = 2; r <= 60; r++) {
+    expWs.getCell(`B${r}`).dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: [categoryRange],
+    };
+
+    expWs.getCell(`C${r}`).dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: ['"shared,personal"'],
+    };
+
+    expWs.getCell(`E${r}`).dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: [currencyRange],
+    };
+
+    expWs.getCell(`F${r}`).dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: [userRange],
+    };
+
+    // Split Among dropdown with 1 member, 2 members, 3 members, or all members
+    expWs.getCell(`H${r}`).dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: [splitAmongRange],
+    };
+  }
+
+  // 4. Settlements Sheet
+  const setWs = wb.addWorksheet('Settlements', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  setWs.columns = [
+    { header: 'Payment Date', key: 'date', width: 16 },
+    { header: 'Amount', key: 'amount', width: 16 },
+    { header: 'Paid By', key: 'paidBy', width: 18 },
+    { header: 'Paid By ID (Auto - Do Not Edit)', key: 'paidById', width: 28 },
+    { header: 'Paid To', key: 'paidTo', width: 18 },
+    { header: 'Paid To ID (Auto - Do Not Edit)', key: 'paidToId', width: 28 },
+    { header: 'Notes', key: 'notes', width: 28 },
+    { header: 'Created Date', key: 'createdDate', width: 22 },
+  ];
+  setWs.autoFilter = { from: 'A1', to: 'H1' };
+
+  const setHeaderRow = setWs.getRow(1);
+  setHeaderRow.height = 28;
+  setHeaderRow.eachCell((cell) => {
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+  });
+
+  for (let r = 2; r <= 30; r++) {
+    const blankSetRow = setWs.addRow({
+      date: '',
+      amount: '',
+      paidBy: '',
+      paidTo: '',
+      notes: '',
+      createdDate: '',
+    });
+    blankSetRow.getCell('paidById').value = {
+      formula: `IFERROR(VLOOKUP(C${r}, Users!$A$2:$B$50, 2, FALSE), "")`,
+    };
+    blankSetRow.getCell('paidToId').value = {
+      formula: `IFERROR(VLOOKUP(E${r}, Users!$A$2:$B$50, 2, FALSE), "")`,
+    };
+    blankSetRow.getCell('amount').numFmt = '#,##0.00';
+
+    setWs.getCell(`C${r}`).dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: [userRange],
+    };
+    setWs.getCell(`E${r}`).dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: [userRange],
+    };
+  }
+
+  const buffer = await wb.xlsx.writeBuffer();
+  return new Uint8Array(buffer);
+}
+
+/**
+ * Parses an XLSX workbook into typed expenses, settlements, members, and settings.
+ * Strict row validation:
+ * - Only saves rows where ALL required columns have values (Created Date, Category, Scope, Original Amount, Currency, Paid By, Split Among).
+ * - Notes is optional; only saved if category is 'other', otherwise ignored.
+ * - Auto-resolves member IDs from users table.
  */
 export function parseExcelWorkbook(wb: WorkBook, defaultSettings: AppSettings): ExcelDatabasePayload {
   const expenses: Expense[] = [];
@@ -396,6 +981,22 @@ export function parseExcelWorkbook(wb: WorkBook, defaultSettings: AppSettings): 
       const name = String(r['Name'] || r['Member Name'] || '').trim();
       const roleStr = String(r['Role'] || r['Is Main User'] || '').toUpperCase();
       const isMain = roleStr === 'YES' || roleStr.includes('MAIN');
+      if (id && name) {
+        loadedMembers.push({ id, name });
+        if (isMain) {
+          settings.mainUserId = id;
+        }
+      }
+    }
+  } else if (wb.SheetNames.includes('Users')) {
+    // Also read from Users reference sheet if present
+    const ws = wb.Sheets['Users'];
+    const rows = (XLSX.utils.sheet_to_json(ws) as Record<string, any>[]) || [];
+    for (const r of rows) {
+      const id = String(r['Member ID'] || r['User ID'] || r['ID'] || '').trim();
+      const name = String(r['Name'] || r['Member Name'] || '').trim();
+      const roleStr = String(r['Role'] || '').toUpperCase();
+      const isMain = roleStr.includes('MAIN');
       if (id && name) {
         loadedMembers.push({ id, name });
         if (isMain) {
@@ -423,9 +1024,6 @@ export function parseExcelWorkbook(wb: WorkBook, defaultSettings: AppSettings): 
       if (key === 'Active Currency Symbol' || key === 'Currency Symbol') {
         if (val) settings.currencySymbol = val;
       }
-      if (key === 'Active Currency Code' || key === 'Currency Code') {
-        if (val) settings.currencyCode = val;
-      }
       if (key === 'Base Currency Code' && val) settings.baseCurrencyCode = val;
       if (key === 'Base Currency Symbol' && val) settings.baseCurrencySymbol = val;
       if (key === 'User Currencies JSON' && val) {
@@ -446,98 +1044,214 @@ export function parseExcelWorkbook(wb: WorkBook, defaultSettings: AppSettings): 
     settings.mainUserId = settings.members[0].id;
   }
 
+  // Preserve the user's default currency selected in settings
+  const preferredUserId = defaultSettings.mainUserId || settings.mainUserId;
+  const userDefaultCurrency =
+    (defaultSettings.userCurrencies && defaultSettings.userCurrencies[preferredUserId]) ||
+    defaultSettings.currencyCode ||
+    'SGD';
+  const userDefaultMeta = getCurrencyMeta(userDefaultCurrency);
+
+  settings.currencyCode = userDefaultCurrency;
+  settings.currencySymbol = userDefaultMeta.symbol;
+  settings.userCurrencies = {
+    ...(settings.userCurrencies || {}),
+    ...(defaultSettings.userCurrencies || {}),
+    [preferredUserId]: userDefaultCurrency,
+  };
+
   const mainUserId = settings.mainUserId;
+  const targetCurrency = userDefaultCurrency;
 
   // Parse Expenses
   if (wb.SheetNames.includes('Expenses')) {
     const ws = wb.Sheets['Expenses'];
     const rows = (XLSX.utils.sheet_to_json(ws) as Record<string, any>[]) || [];
     for (const r of rows) {
-      const id = String(r['ID'] || `exp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`);
-      const rawCategory = (String(r['Category'] || 'meal').toLowerCase().trim()) as any;
-      const category: ExpenseCategory = ['meal', 'groceries', 'transport', 'entertainment', 'daily', 'utilities', 'other'].includes(rawCategory)
-        ? rawCategory
-        : 'meal';
-      const rawNotes = r['Notes'] ? String(r['Notes']).trim() : undefined;
-      // Notes is only retained if category is 'other'
-      const notes = category === 'other' ? (rawNotes || (r['Title'] ? String(r['Title']).trim() : undefined)) : undefined;
+      // 1. Created Date validation: required non-empty
+      const rawCreated = r['Created Date'] !== undefined && r['Created Date'] !== null ? r['Created Date'] : r['Date'];
+      if (rawCreated === undefined || rawCreated === null || String(rawCreated).trim() === '') {
+        continue; // Skip row: missing required Created Date
+      }
 
-      // Title is derived from category label or notes if other
+      let createdAt = Date.now();
+      let date = new Date().toISOString().split('T')[0];
+      if (typeof rawCreated === 'number') {
+        const parsedCreated = new Date(Math.round((rawCreated - 25569) * 86400 * 1000));
+        if (!isNaN(parsedCreated.getTime())) {
+          createdAt = parsedCreated.getTime();
+          date = parsedCreated.toISOString().split('T')[0];
+        }
+      } else {
+        const parsedCreated = new Date(String(rawCreated).trim());
+        if (!isNaN(parsedCreated.getTime())) {
+          createdAt = parsedCreated.getTime();
+          date = parsedCreated.toISOString().split('T')[0];
+        } else if (String(rawCreated).trim().match(/^\d{4}-\d{2}-\d{2}$/)) {
+          date = String(rawCreated).trim();
+          createdAt = new Date(date).getTime();
+        }
+      }
+
+      // 2. Category validation: required non-empty
+      const rawCategoryStr = String(r['Category'] || '').trim().toLowerCase();
+      if (!rawCategoryStr) {
+        continue; // Skip row: missing required Category
+      }
+      const category: ExpenseCategory = ['meal', 'groceries', 'transport', 'entertainment', 'daily', 'utilities', 'other'].includes(rawCategoryStr as any)
+        ? (rawCategoryStr as ExpenseCategory)
+        : 'meal';
+
+      // 3. Scope validation: required non-empty
+      const rawScope = String(r['Scope'] || '').trim().toLowerCase();
+      if (!rawScope) {
+        continue; // Skip row: missing required Scope
+      }
+      const scope: 'shared' | 'personal' = rawScope === 'personal' ? 'personal' : 'shared';
+      const splitType: any = scope === 'personal' ? 'personal' : 'equal';
+
+      // 4. Original Amount validation: required number > 0
+      const rawOrigAmount = r['Original Amount'] !== undefined && r['Original Amount'] !== ''
+        ? Number(r['Original Amount'])
+        : (r['Amount'] !== undefined && r['Amount'] !== '' ? Number(r['Amount']) : undefined);
+      if (rawOrigAmount === undefined || isNaN(rawOrigAmount) || rawOrigAmount <= 0) {
+        continue; // Skip row: missing or invalid required Original Amount
+      }
+      const originalAmount = rawOrigAmount;
+
+      // 5. Original Currency validation: required non-empty
+      const rawCurrency = String(r['Original Currency'] || '').trim().toUpperCase();
+      if (!rawCurrency) {
+        continue; // Skip row: missing required Currency
+      }
+      const originalCurrency = rawCurrency;
+      const currencyMeta = getCurrencyMeta(originalCurrency);
+      const originalCurrencySymbol = r['Original Symbol'] ? String(r['Original Symbol']).trim() : currencyMeta.symbol;
+
+      // 6. Paid By validation: required non-empty
+      const rawPaidByName = String(r['Paid By'] || '').trim();
+      let rawPaidById = String(
+        r['Paid By ID (Auto - Do Not Edit)'] ||
+        r['Paid By ID'] ||
+        r['Paid By Code'] ||
+        ''
+      ).trim();
+      if (rawPaidById.startsWith('=') || rawPaidById.includes('#')) {
+        rawPaidById = '';
+      }
+      if (!rawPaidByName && !rawPaidById) {
+        continue; // Skip row: missing required Paid By
+      }
+
+      let payerMember = settings.members.find(m => m.id === rawPaidById);
+      if (!payerMember && rawPaidByName) {
+        payerMember = settings.members.find(m => m.name.toLowerCase() === rawPaidByName.toLowerCase());
+      }
+      const paidBy = payerMember ? payerMember.id : normalizePayerId(rawPaidById || rawPaidByName, mainUserId, settings.members);
+      if (!paidBy) {
+        continue; // Skip row: could not determine Paid By member
+      }
+
+      // 7. Split Among validation: required non-empty
+      const rawSplitAmong = String(r['Split Among'] || '').trim();
+      let rawSplitAmongId = String(
+        r['Split Among ID (Auto - Do Not Edit)'] ||
+        r['Split Among ID'] ||
+        r['Split Among IDs'] ||
+        ''
+      ).trim();
+      if (rawSplitAmongId.startsWith('=') || rawSplitAmongId.includes('#')) {
+        rawSplitAmongId = '';
+      }
+      if (!rawSplitAmong && !rawSplitAmongId && scope !== 'personal') {
+        continue; // Skip row: missing required Split Among
+      }
+
+      let splitAmong: string[] = [];
+      if (scope === 'personal') {
+        splitAmong = [paidBy];
+      } else if (!rawSplitAmong || rawSplitAmong.toLowerCase() === 'all members' || rawSplitAmongId.toUpperCase() === 'ALL') {
+        splitAmong = settings.members.map(m => m.id);
+      } else if (rawSplitAmongId) {
+        splitAmong = rawSplitAmongId
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean)
+          .map(id => {
+            const found = settings.members.find(m => m.id === id || m.name.toLowerCase() === id.toLowerCase());
+            return found ? found.id : normalizePayerId(id, mainUserId, settings.members);
+          });
+      } else if (rawSplitAmong) {
+        splitAmong = rawSplitAmong
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean)
+          .map(name => {
+            const found = settings.members.find(m => m.name.toLowerCase() === name.toLowerCase() || m.id === name);
+            return found ? found.id : normalizePayerId(name, mainUserId, settings.members);
+          });
+      }
+      if (!splitAmong || splitAmong.length === 0) {
+        continue; // Skip row: empty split members
+      }
+
+      // 8. Notes: OPTIONAL, but ONLY saved if category is 'other', otherwise ignored
+      const rawNotes = r['Notes (Optional - Saved only if Category is other)'] !== undefined
+        ? r['Notes (Optional - Saved only if Category is other)']
+        : (r['Notes (Optional - Only for Others)'] !== undefined
+          ? r['Notes (Optional - Only for Others)']
+          : (r['Notes'] !== undefined ? r['Notes'] : r['Title']));
+      let notes: string | undefined = undefined;
+      if (category === 'other' && rawNotes && String(rawNotes).trim() !== '') {
+        notes = String(rawNotes).trim();
+      }
       const title = category === 'other'
-        ? (notes || (r['Title'] ? String(r['Title']).trim() : 'Other Expense'))
+        ? (notes || 'Other Expense')
         : (CATEGORIES[category]?.label || 'Expense');
 
-      const amount = Number(r['Total Amount'] || r['Amount'] || 0);
-      const date = String(r['Date'] || new Date().toISOString().split('T')[0]).trim();
+      // 9. ID: auto-generated by system if not provided
+      const id = r['ID'] && String(r['ID']).trim()
+        ? String(r['ID']).trim()
+        : `exp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-      // Determine paidBy
-      const rawPaidById = String(r['Paid By ID'] || r['Paid By Code'] || '').trim();
-      const rawPaidByName = String(r['Paid By'] || '').trim();
-      const paidBy = normalizePayerId(rawPaidById || rawPaidByName, mainUserId, settings.members);
+      // 10. Exchange Rate & Total Amount: auto-calculated
+      let exchangeRate: number = 1.0;
+      let amount: number = originalAmount;
 
-      // Determine scope & splitType
-      const rawScope = String(r['Scope'] || '').toLowerCase();
-      const rawSplit = String(r['Split Type'] || '').toLowerCase();
-      const scope: 'shared' | 'personal' = rawScope === 'personal' || rawSplit === 'personal' ? 'personal' : 'shared';
-      const splitType: any = rawSplit || (scope === 'personal' ? 'personal' : 'equal');
-
-      // Split Among
-      let splitAmong: string[] | undefined = undefined;
-      const rawSplitAmongIds = String(r['Split Among IDs'] || '').trim();
-      const rawSplitAmongNames = String(r['Split Among'] || '').trim();
-      if (rawSplitAmongIds) {
-        splitAmong = rawSplitAmongIds
-          .split(',')
-          .map(s => s.trim())
-          .filter(Boolean)
-          .map(id => normalizePayerId(id, mainUserId, settings.members));
-      } else if (scope === 'personal') {
-        splitAmong = [paidBy];
-      } else if (rawSplitAmongNames && rawSplitAmongNames !== 'All Members') {
-        splitAmong = rawSplitAmongNames
-          .split(',')
-          .map(s => s.trim())
-          .filter(Boolean)
-          .map(name => normalizePayerId(name, mainUserId, settings.members));
+      if (originalCurrency.toUpperCase() === targetCurrency.toUpperCase()) {
+        exchangeRate = 1.0;
+        amount = originalAmount;
       } else {
-        splitAmong = settings.members.map(m => m.id);
+        const rawRate = r['Exchange Rate'];
+        if (rawRate !== undefined && rawRate !== null && rawRate !== '' && !isNaN(Number(rawRate)) && Number(rawRate) > 0) {
+          exchangeRate = Number(rawRate);
+        } else {
+          exchangeRate = getConversionRate(originalCurrency, targetCurrency);
+        }
+        const isZeroDecimal = targetCurrency === 'JPY' || targetCurrency === 'KRW';
+        const converted = originalAmount * exchangeRate;
+        amount = isZeroDecimal ? Math.round(converted) : Number(converted.toFixed(2));
       }
 
-      const createdAt = r['Created Date'] ? new Date(r['Created Date']).getTime() : Date.now();
-
-      // Multi-currency attributes
-      const rawOrigAmount = r['Original Amount'];
-      const originalAmount = rawOrigAmount !== undefined && rawOrigAmount !== null && rawOrigAmount !== ''
-        ? Number(rawOrigAmount)
-        : undefined;
-      const originalCurrency = r['Original Currency'] ? String(r['Original Currency']).trim() : undefined;
-      const originalCurrencySymbol = r['Original Symbol'] ? String(r['Original Symbol']).trim() : undefined;
-      const rawRate = r['Exchange Rate'];
-      const exchangeRate = rawRate !== undefined && rawRate !== null && rawRate !== ''
-        ? Number(rawRate)
-        : undefined;
-
-      if (amount > 0 || (originalAmount && originalAmount > 0)) {
-        expenses.push({
-          id,
-          title,
-          amount,
-          date,
-          category,
-          paidBy,
-          splitType,
-          expenseScope: scope,
-          splitAmong,
-          myShare: scope === 'personal' ? (paidBy === mainUserId ? amount : 0) : amount / (splitAmong?.length || 1),
-          friendShare: 0,
-          notes,
-          createdAt: isNaN(createdAt) ? Date.now() : createdAt,
-          originalAmount,
-          originalCurrency,
-          originalCurrencySymbol,
-          exchangeRate,
-        });
-      }
+      expenses.push({
+        id,
+        title,
+        amount: amount || originalAmount,
+        date,
+        category,
+        paidBy,
+        splitType,
+        expenseScope: scope,
+        splitAmong,
+        myShare: scope === 'personal' ? (paidBy === mainUserId ? (amount || originalAmount) : 0) : (amount || originalAmount) / (splitAmong.length || 1),
+        friendShare: 0,
+        notes,
+        createdAt: isNaN(createdAt) ? Date.now() : createdAt,
+        originalAmount,
+        originalCurrency,
+        originalCurrencySymbol,
+        exchangeRate,
+      });
     }
   }
 
@@ -548,15 +1262,42 @@ export function parseExcelWorkbook(wb: WorkBook, defaultSettings: AppSettings): 
     for (const r of rows) {
       const id = String(r['ID'] || `set_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`);
       const amount = Number(r['Amount'] || 0);
-      const date = String(r['Payment Date'] || r['Date'] || new Date().toISOString().split('T')[0]).trim();
+      if (isNaN(amount) || amount <= 0) continue;
 
-      const rawPaidById = String(r['Paid By ID'] || r['Paid By Code'] || '').trim();
+      let date = String(r['Payment Date'] || r['Date'] || '').trim();
+      if (typeof r['Payment Date'] === 'number') {
+        const parsedDate = new Date(Math.round((r['Payment Date'] - 25569) * 86400 * 1000));
+        if (!isNaN(parsedDate.getTime())) date = parsedDate.toISOString().split('T')[0];
+      }
+      if (!date || date === 'undefined') {
+        date = new Date().toISOString().split('T')[0];
+      }
+
+      const rawPaidById = String(
+        r['Paid By ID (Auto - Do Not Edit)'] ||
+        r['Paid By ID'] ||
+        r['Paid By Code'] ||
+        ''
+      ).trim();
       const rawPaidByName = String(r['Paid By'] || '').trim();
-      const paidBy = normalizePayerId(rawPaidById || rawPaidByName, mainUserId, settings.members);
+      let payerMember = settings.members.find(m => m.id === rawPaidById);
+      if (!payerMember && rawPaidByName) {
+        payerMember = settings.members.find(m => m.name.toLowerCase() === rawPaidByName.toLowerCase());
+      }
+      const paidBy = payerMember ? payerMember.id : normalizePayerId(rawPaidById || rawPaidByName, mainUserId, settings.members);
 
-      const rawPaidToId = String(r['Paid To ID'] || '').trim();
+      const rawPaidToId = String(
+        r['Paid To ID (Auto - Do Not Edit)'] ||
+        r['Paid To ID'] ||
+        ''
+      ).trim();
       const rawPaidToName = String(r['Paid To'] || '').trim();
-      let paidTo = normalizePayerId(rawPaidToId || rawPaidToName, mainUserId, settings.members);
+      let receiverMember = settings.members.find(m => m.id === rawPaidToId);
+      if (!receiverMember && rawPaidToName) {
+        receiverMember = settings.members.find(m => m.name.toLowerCase() === rawPaidToName.toLowerCase());
+      }
+      let paidTo = receiverMember ? receiverMember.id : normalizePayerId(rawPaidToId || rawPaidToName, mainUserId, settings.members);
+
       if (!paidTo || paidTo === paidBy) {
         paidTo = paidBy === mainUserId
           ? (settings.members.find(m => m.id !== mainUserId)?.id || '10002')
@@ -564,19 +1305,26 @@ export function parseExcelWorkbook(wb: WorkBook, defaultSettings: AppSettings): 
       }
 
       const notes = r['Notes'] ? String(r['Notes']).trim() : undefined;
-      const createdAt = r['Created Date'] ? new Date(r['Created Date']).getTime() : Date.now();
-
-      if (amount > 0) {
-        settlements.push({
-          id,
-          amount,
-          date,
-          paidBy,
-          paidTo,
-          notes,
-          createdAt: isNaN(createdAt) ? Date.now() : createdAt,
-        });
+      let createdAt = Date.now();
+      if (r['Created Date']) {
+        if (typeof r['Created Date'] === 'number') {
+          const parsedCreated = new Date(Math.round((r['Created Date'] - 25569) * 86400 * 1000));
+          if (!isNaN(parsedCreated.getTime())) createdAt = parsedCreated.getTime();
+        } else {
+          const parsedCreated = new Date(r['Created Date']).getTime();
+          if (!isNaN(parsedCreated)) createdAt = parsedCreated;
+        }
       }
+
+      settlements.push({
+        id,
+        amount,
+        date,
+        paidBy,
+        paidTo,
+        notes,
+        createdAt: isNaN(createdAt) ? Date.now() : createdAt,
+      });
     }
   }
 
