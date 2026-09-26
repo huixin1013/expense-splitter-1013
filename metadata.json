@@ -1,0 +1,6 @@
+{
+  "name": "Friend Expense Splitter",
+  "description": "Calculate shared meals and daily expenses with your friend, track personal expenses, see who owes whom, and save all data directly into an Excel database.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

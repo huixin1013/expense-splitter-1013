@@ -1,0 +1,84 @@
+{
+  "entities": {
+    "user": {
+      "title": "User",
+      "description": "User profile with passkey and preferences",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique 5-digit or string user ID" },
+        "name": { "type": "string", "description": "User display name" },
+        "passcode": { "type": "string", "description": "Login passcode" },
+        "currency": { "type": "string", "description": "Preferred viewing currency code" },
+        "role": { "type": "string", "description": "User access role" },
+        "createdAt": { "type": "number", "description": "Creation timestamp" }
+      },
+      "required": ["id", "name", "passcode"]
+    },
+    "expense": {
+      "title": "Expense",
+      "description": "Individual expense item with split details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique expense ID" },
+        "title": { "type": "string", "description": "Expense title or description" },
+        "amount": { "type": "number", "description": "Expense total amount" },
+        "date": { "type": "string", "description": "ISO date string" },
+        "category": { "type": "string", "description": "Expense category key" },
+        "paidBy": { "type": "string", "description": "User ID who paid" },
+        "splitType": { "type": "string", "description": "Split type (equal, custom, etc)" },
+        "expenseScope": { "type": "string", "description": "Scope (shared, personal)" },
+        "splitAmong": { "type": "array", "description": "List of participant user IDs" },
+        "notes": { "type": "string", "description": "Optional notes" },
+        "createdAt": { "type": "number", "description": "Creation timestamp" }
+      },
+      "required": ["id", "title", "amount", "date", "category", "paidBy", "expenseScope"]
+    },
+    "settlement": {
+      "title": "Settlement",
+      "description": "Repayment transaction between two users",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique settlement ID" },
+        "paidBy": { "type": "string", "description": "Payer user ID" },
+        "paidTo": { "type": "string", "description": "Receiver user ID" },
+        "amount": { "type": "number", "description": "Settled amount" },
+        "date": { "type": "string", "description": "ISO date string" },
+        "notes": { "type": "string", "description": "Optional settlement memo" },
+        "createdAt": { "type": "number", "description": "Creation timestamp" }
+      },
+      "required": ["id", "paidBy", "paidTo", "amount", "date"]
+    },
+    "settings": {
+      "title": "Settings",
+      "description": "Global shared application settings",
+      "type": "object",
+      "properties": {
+        "currencyCode": { "type": "string", "description": "Base currency code" },
+        "currencySymbol": { "type": "string", "description": "Currency symbol" },
+        "mainUserId": { "type": "string", "description": "Primary user ID" },
+        "developerUserId": { "type": "string", "description": "Developer user ID" },
+        "members": { "type": "array", "description": "Member directory" },
+        "updatedAt": { "type": "number", "description": "Last update timestamp" }
+      },
+      "required": ["currencyCode", "currencySymbol", "members"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "user",
+      "description": "App users and credentials"
+    },
+    "/expenses/{expenseId}": {
+      "schema": "expense",
+      "description": "All recorded expenses"
+    },
+    "/settlements/{settlementId}": {
+      "schema": "settlement",
+      "description": "All debt settlements"
+    },
+    "/settings/{configId}": {
+      "schema": "settings",
+      "description": "Global settings and member directory"
+    }
+  }
+}
